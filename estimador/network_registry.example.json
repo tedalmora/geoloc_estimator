@@ -1,0 +1,5 @@
+{
+  "_leia_isto": "1 entrada por PCI conhecido. azimute_graus e opcional -- use null se a celula for omnidirecional (ex.: o QCell indoor) ou se o azimute do setor ainda nao for conhecido; nesse caso o metodo Cell-ID+TA so reporta um raio de incerteza, sem deslocar o ponto (ver methods/network_position.py). Copie este arquivo para network_registry.json (sem '.example') e preencha com os valores reais assim que posicionar as antenas.",
+  "100": {"lat": -26.9000, "lon": -49.0700, "azimute_graus": 120},
+  "200": {"lat": -26.9010, "lon": -49.0710, "azimute_graus": null}
+}

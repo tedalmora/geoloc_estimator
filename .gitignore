@@ -1,0 +1,21 @@
+# ambiente virtual Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# bancos de dados gerados localmente (radiomapa, estimativas ao vivo)
+*.db
+*.sqlite
+*.sqlite3
+
+# modelos treinados (grandes, e reproduzíveis a partir do radiomapa + train.py)
+modelos/
+*.joblib
+
+# cadastro de posição REAL das células -- fica só local/no laboratório,
+# o que vai para o Git é só o .example.json
+estimador/network_registry.json
+
+# exports de CSV feitos localmente
+*.csv
