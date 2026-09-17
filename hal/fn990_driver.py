@@ -15,7 +15,7 @@ import serial  # pyserial
 
 from .modem_driver import ModemDriver
 from .models import GnssFix, LppReport, ModemStatus, NeighborCell, ServingCell, SignalMetrics
-from .parsing import extract_float, extract_int, extract_str, nmea_to_decimal, strip_echo
+from .parsing import extract_float, extract_str, nmea_to_decimal, strip_echo
 
 
 class FN990Driver(ModemDriver):
@@ -90,18 +90,30 @@ class FN990Driver(ModemDriver):
 
     # ------------------------------------------------------------------ sinal / célula
     def get_signal_metrics(self) -> SignalMetrics:
-        raw = self.send_at("AT#RFSTS")
+        """RSRP/RSRQ vêm do #MONI -- formato real confirmado em campo (Vivo, LTE):
+        '#MONI: VIVO RSRP:-108 RSRQ:-12 TAC:87BB Id:F560E67 EARFCN:3375 PWR:-77dbm DRX:640'.
+        SINR e Timing Advance NÃO aparecem nesse formato real (nem no #RFSTS, que é puramente
+        posicional/sem rótulos e ainda não foi reverso-engenheirado com confiança) -- ficam
+        None até confirmar em campo qual comando/campo reporta cada um."""
+        raw = self.send_at("AT#MONI")
         rsrp = extract_float(raw, r"RSRP:\s*(-?\d+\.?\d*)")
         rsrq = extract_float(raw, r"RSRQ:\s*(-?\d+\.?\d*)")
-        sinr = extract_float(raw, r"SINR:\s*(-?\d+\.?\d*)")
-        ta = extract_int(raw, r"TA:\s*(\d+)")
+        sinr = None  # TODO: confirmar em campo qual comando reporta isso (não está no #MONI real)
+        ta = None    # TODO: confirmar em campo qual comando reporta isso (não está no #MONI real)
         technology = "5G" if "NR" in raw.upper() else "4G"
         return SignalMetrics(technology, rsrp, rsrq, sinr, ta)
 
     def get_serving_cell(self) -> ServingCell:
+        """Mesmo #MONI acima: `Id:` é o Cell ID (hex) e `TAC:` o Tracking Area Code (hex) --
+        os dois batem com o que o #RFSTS mostra para a mesma célula. Esse formato real **não
+        inclui o PCI** (Physical Cell ID) -- fica None até achar um comando/campo confirmado
+        que reporte isso (candidato: algum campo posicional do #RFSTS, ainda não confirmado).
+        Isso afeta `estimador/methods/network_position.py`, que hoje indexa o cadastro de
+        células por PCI -- pode ser necessário reindexar por Cell ID em vez disso, já que só
+        esse está confirmado disponível neste modem/firmware."""
         raw = self.send_at("AT#MONI")
-        cell_id = extract_str(raw, r"Cell:\s*([0-9A-Fa-f]+)")
-        pci = extract_int(raw, r"PSC/PCI:\s*(\d+)")
+        cell_id = extract_str(raw, r"Id:\s*([0-9A-Fa-f]+)")
+        pci = None  # TODO: não disponível no #MONI real -- ver docstring
         tac = extract_str(raw, r"TAC:\s*([0-9A-Fa-f]+)")
         return ServingCell(cell_id, pci, tac)
 
