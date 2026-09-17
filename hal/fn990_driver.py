@@ -25,6 +25,7 @@ class FN990Driver(ModemDriver):
         self._timeout: float = 5.0
         self._csurv_cache: Optional[List[str]] = None
         self._csurv_cache_time: float = 0.0
+        self._csurv_last_issue_time: float = 0.0
 
     # ------------------------------------------------------------------ conexão
     def connect(self, port: str, baudrate: int = 115200, timeout: float = 5.0) -> None:
@@ -59,6 +60,12 @@ class FN990Driver(ModemDriver):
             lines.append(line)
             if line in ("OK", "ERROR") or line.startswith("+CME ERROR"):
                 break
+        # Comandos lentos (ex.: #CSURV, uma varredura de rede ativa) confirmados em campo
+        # continuando a emitir bytes um instante depois do "OK" -- sem descartar isso agora,
+        # esses bytes vazam pro início da resposta do PRÓXIMO comando AT e corrompem o parsing
+        # dele (foi assim que um #MONI saiu vazio logo depois de um #CSURV mal espaçado).
+        time.sleep(0.3)
+        self._ser.reset_input_buffer()
         return "\n".join(lines)
 
     def is_alive(self) -> bool:
@@ -129,7 +136,14 @@ class FN990Driver(ModemDriver):
         agora = time.time()
         if self._csurv_cache is not None and (agora - self._csurv_cache_time) < max_age_s:
             return self._csurv_cache
-        raw = self.send_at("AT#CSURV", timeout=10.0)  # varredura completa -- pode demorar mais
+        # confirmado em campo: chamar o #CSURV de novo logo depois de um anterior (sem dar
+        # tempo do rádio "descansar") faz o modem devolver uma varredura vazia/degenerada --
+        # forçamos um intervalo mínimo entre chamadas reais (não cacheadas) por causa disso.
+        espera = 2.0 - (agora - self._csurv_last_issue_time)
+        if espera > 0:
+            time.sleep(espera)
+        raw = self.send_at("AT#CSURV", timeout=30.0)  # varredura completa -- pode demorar mais
+        self._csurv_last_issue_time = time.time()
         self._csurv_cache = re.split(r"(?=\b(?:earfcn|uarfcn|nr_arfcn):)", raw)
         self._csurv_cache_time = agora
         return self._csurv_cache
