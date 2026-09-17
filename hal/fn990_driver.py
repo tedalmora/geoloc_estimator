@@ -1,11 +1,10 @@
 """Driver de modem para o Telit Cinterion FN990.
 
 Os comandos usados aqui são reais -- confirmados a partir do AT+CLAC rodado no modem físico
-(ver planejamento/comandosModem.txt e planejamento/guia_comandos_modem.md). O FORMATO exato
-das respostas que dependem de rede (#MONI, #RFSTS, #CSURV, $GPSACP com fix) ainda não foi
-validado com SIM + rede real -- os comentários abaixo marcam onde recalibrar assim que
-houver dados de campo (cole a saída real e ajuste as regex, é o mesmo processo já usado
-para confirmar os comandos existentes via AT+CLAC).
+(ver planejamento/comandosModem.txt e planejamento/guia_comandos_modem.md). O FORMATO das
+respostas de rede (#MONI, #CSURV, #SERVINFO, +CESQ, $GPSACP com fix) já foi validado em campo
+com SIM real (Vivo, LTE) -- ver docstrings de cada método para o que cada campo significa e o
+que ainda não foi confirmado (SINR, Timing Advance).
 """
 import re
 import time
@@ -24,6 +23,8 @@ class FN990Driver(ModemDriver):
         self._port: Optional[str] = None
         self._baudrate: int = 115200
         self._timeout: float = 5.0
+        self._csurv_cache: Optional[List[str]] = None
+        self._csurv_cache_time: float = 0.0
 
     # ------------------------------------------------------------------ conexão
     def connect(self, port: str, baudrate: int = 115200, timeout: float = 5.0) -> None:
@@ -90,38 +91,79 @@ class FN990Driver(ModemDriver):
 
     # ------------------------------------------------------------------ sinal / célula
     def get_signal_metrics(self) -> SignalMetrics:
-        """RSRP/RSRQ vêm do #MONI -- formato real confirmado em campo (Vivo, LTE):
-        '#MONI: VIVO RSRP:-108 RSRQ:-12 TAC:87BB Id:F560E67 EARFCN:3375 PWR:-77dbm DRX:640'.
-        SINR e Timing Advance NÃO aparecem nesse formato real (nem no #RFSTS, que é puramente
-        posicional/sem rótulos e ainda não foi reverso-engenheirado com confiança) -- ficam
-        None até confirmar em campo qual comando/campo reporta cada um."""
+        """RSRP/RSRQ vêm do #MONI -- formato real confirmado em campo (Vivo, LTE), 2x, e
+        cruzado com AT+CESQ (rsrq=(16/2)-19,5=-11,5dB, rsrp=34-140=-106dBm -- muito próximo
+        do #MONI na mesma janela de tempo, confirma a leitura). SINR e Timing Advance **não**
+        aparecem em nenhum dos comandos testados até agora (#MONI, #RFSTS, #SERVINFO, +CESQ)
+        -- não é mais só "ainda não achamos", parece não estar exposto via AT simples neste
+        firmware. Ficam None; só reconsiderar se aparecer um comando/campo novo confirmado."""
         raw = self.send_at("AT#MONI")
         rsrp = extract_float(raw, r"RSRP:\s*(-?\d+\.?\d*)")
         rsrq = extract_float(raw, r"RSRQ:\s*(-?\d+\.?\d*)")
-        sinr = None  # TODO: confirmar em campo qual comando reporta isso (não está no #MONI real)
-        ta = None    # TODO: confirmar em campo qual comando reporta isso (não está no #MONI real)
+        sinr = None  # não exposto via AT simples neste firmware -- ver docstring
+        ta = None    # não exposto via AT simples neste firmware -- ver docstring
         technology = "5G" if "NR" in raw.upper() else "4G"
         return SignalMetrics(technology, rsrp, rsrq, sinr, ta)
 
     def get_serving_cell(self) -> ServingCell:
-        """Mesmo #MONI acima: `Id:` é o Cell ID (hex) e `TAC:` o Tracking Area Code (hex) --
-        os dois batem com o que o #RFSTS mostra para a mesma célula. Esse formato real **não
-        inclui o PCI** (Physical Cell ID) -- fica None até achar um comando/campo confirmado
-        que reporte isso (candidato: algum campo posicional do #RFSTS, ainda não confirmado).
-        Isso afeta `estimador/methods/network_position.py`, que hoje indexa o cadastro de
-        células por PCI -- pode ser necessário reindexar por Cell ID em vez disso, já que só
-        esse está confirmado disponível neste modem/firmware."""
+        """`Id:`/`TAC:` do #MONI dão cell_id/tac direto. PCI (Physical Cell ID) **não** aparece
+        no #MONI nem no #SERVINFO (`#SERVINFO: 3375,-76,"VIVO","72406",F560E67,87BB,640,3,-107`
+        -- conferido campo a campo, nenhum bate com o PCI real) -- só existe cruzando o
+        #CSURV (que lista `phyCellId` por célula) com o cell_id da própria #MONI. Confirmado
+        2x em campo: a mesma célula (cellId F560E67/tac 87BB/earfcn 3375) sempre aparece com
+        phyCellId 254 no #CSURV. Isso custa 1 varredura completa (`_get_csurv_records`, com
+        cache curto -- ver abaixo) só na primeira vez do ciclo de poll."""
         raw = self.send_at("AT#MONI")
         cell_id = extract_str(raw, r"Id:\s*([0-9A-Fa-f]+)")
-        pci = None  # TODO: não disponível no #MONI real -- ver docstring
         tac = extract_str(raw, r"TAC:\s*([0-9A-Fa-f]+)")
+        pci = self._find_pci_via_csurv(cell_id) if cell_id else None
         return ServingCell(cell_id, pci, tac)
 
-    def get_neighbor_cells(self) -> List[NeighborCell]:
+    def _get_csurv_records(self, max_age_s: float = 3.0) -> List[str]:
+        """Cacheia o #CSURV por alguns segundos -- `get_serving_cell()` (via cross-match de
+        PCI) e `get_neighbor_cells()` são chamados em sequência no mesmo ciclo de poll
+        (`coletor/daemon.py: poll_once`) e não precisam rodar a varredura completa (alguns
+        segundos) duas vezes seguidas. Separa por REGISTRO (não por linha) porque o terminal
+        pode quebrar uma linha ao meio por causa da largura da tela -- os bytes reais do modem
+        não garantem isso."""
+        agora = time.time()
+        if self._csurv_cache is not None and (agora - self._csurv_cache_time) < max_age_s:
+            return self._csurv_cache
         raw = self.send_at("AT#CSURV", timeout=10.0)  # varredura completa -- pode demorar mais
+        self._csurv_cache = re.split(r"(?=\b(?:earfcn|uarfcn|nr_arfcn):)", raw)
+        self._csurv_cache_time = agora
+        return self._csurv_cache
+
+    def _find_pci_via_csurv(self, cell_id_hex: str) -> Optional[int]:
+        """Acha o phyCellId (PCI) do registro do #CSURV cujo cellId (decimal) bate com o
+        cell_id (hex) reportado pela #MONI -- ver docstring de get_serving_cell()."""
+        try:
+            cell_id_dec = int(cell_id_hex, 16)
+        except ValueError:
+            return None
+        for record in self._get_csurv_records():
+            if not record.lstrip().startswith("earfcn:"):
+                continue
+            match = re.search(r"cellId:\s*(\d+).*?phyCellId:\s*(\d+)", record, re.S)
+            if match and int(match.group(1)) == cell_id_dec:
+                return int(match.group(2))
+        return None
+
+    def get_neighbor_cells(self) -> List[NeighborCell]:
+        """Formato real confirmado em campo -- 1 registro por célula, um destes 3 tipos:
+        'nr_arfcn: 629952 nr_band: 78 nr_scs: 30 nr_mcc: 724 nr_mnc: 06' (5G NR -- sem RSRP
+        nesse formato, só ARFCN/banda, então ainda não dá pra usar como feature de sinal);
+        'earfcn: 3375 rxLev: -76 mcc: 724 mnc: 06 cellId: 257298023 tac: 34747 phyCellId: 254
+        cellStatus: CELL_SUITABLE rsrp: -107 rsrq: -12 bw: 15' (LTE -- é o que usamos aqui,
+        `phyCellId` = PCI); 'uarfcn: ... scr code: 2960 ... rscp: -78 ecio: -7.0' (3G/UMTS --
+        usa "scrambling code" em vez de PCI e RSCP em vez de RSRP, TODO: incorporar também)."""
         neighbors: List[NeighborCell] = []
-        for pci_str, rsrp_str in re.findall(r"PCI:\s*(\d+).*?RSRP:\s*(-?\d+\.?\d*)", raw, re.S):
-            neighbors.append(NeighborCell(pci=int(pci_str), rsrp_dbm=float(rsrp_str)))
+        for record in self._get_csurv_records():
+            if not record.lstrip().startswith("earfcn:"):
+                continue  # TODO: incorporar "uarfcn:" (3G) -- "nr_arfcn:" não traz RSRP
+            match = re.search(r"phyCellId:\s*(\d+).*?rsrp:\s*(-?\d+\.?\d*)", record, re.S)
+            if match:
+                neighbors.append(NeighborCell(pci=int(match.group(1)), rsrp_dbm=float(match.group(2))))
         return neighbors
 
     # ------------------------------------------------------------------ GNSS
