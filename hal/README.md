@@ -35,8 +35,8 @@ isso é responsabilidade do Coletor e do Estimador, respectivamente.
 | `is_alive()` / `reconnect()` | `AT` | health check (usado pelo Coletor) | Não |
 | `get_status()` | `ATI`, `+CGMI/CGMM/CGMR/CGSN`, `+CPIN?`, `+CSQ`, `+COPS?`, `#UPTIME`, `#TEMPSENS` | diagnóstico/manutenção — não é geolocalização em si | Parcial |
 | `reboot()` | `AT#REBOOT` | manutenção | Não |
-| `get_serving_cell()` | `AT#MONI` | **Cell-ID / E-CID** | Sim, p/ valor útil |
-| `get_signal_metrics()` | `AT#RFSTS` | RSRP/RSRQ/SINR + **Timing Advance** — alimenta os métodos `ta` e `fingerprint` do Estimador | Sim, p/ valor útil |
+| `get_serving_cell()` | `AT#MONI` (+ `AT#CSURV` para achar o PCI) | **Cell-ID / E-CID** | Sim, p/ valor útil |
+| `get_signal_metrics()` | `AT#MONI` | RSRP/RSRQ — alimenta o **Fingerprint**. SINR e Timing Advance ficam sempre `None` neste firmware (ver nota abaixo) | Sim, p/ valor útil |
 | `get_neighbor_cells()` | `AT#CSURV` | **Fingerprinting** (células vizinhas) | Sim, p/ valor útil |
 | `get_gnss_fix()` | `AT$GPSACP` | *ground truth* (posição real, usada para treinar/avaliar TODOS os métodos) | Não (independente da operadora) |
 | `enable_lpp_positioning()` | `AT$LCSLPP=1` | habilita a sessão para **DL-AoD/UL-AoA** | Sim |

@@ -55,7 +55,7 @@ métodos viraram cálculo direto -- só o Fingerprint ainda usa aprendizado de m
 |---|---|---|---|
 | Cell-ID / E-CID | Não | Não | `estimador.live` ou `estimador.infer cell_id` |
 | E-CID de rede | Não | Não | mesma função do Cell-ID -- só falta a integração com o core (ver `estimador/README.md`) |
-| Cell-ID + Timing Advance | Não | Não | `estimador.live` ou `estimador.infer ta` |
+| Cell-ID + Timing Advance | Não | Não | `estimador.live` ou `estimador.infer ta` -- **hoje se comporta igual ao Cell-ID puro**: o TA não é exposto pelo firmware atual do modem, só com upgrade (ver `hal/README.md`) |
 | Fingerprinting | **Sim** | **Sim** -- único que precisa | `estimador.train` (offline) depois `estimador.live`/`infer fingerprint` |
 | DL-AoD / UL-AoA | Não | Não | `estimador.live`/`infer aoa` -- mas o **ângulo** ainda precisa ser extraído manualmente do relatório LPP (ver `hal/README.md`) |
 
@@ -122,7 +122,7 @@ para a explicação completa (o que cada método faz/não faz e para qual geoloc
 ```bash
 python -m hal.cli --port /dev/ttyUSB2 alive       # "Vivo" ou "Sem resposta"
 python -m hal.cli --port /dev/ttyUSB2 status      # fabricante, modelo, firmware, IMEI, SIM, uptime, temperatura...
-python -m hal.cli --port /dev/ttyUSB2 signal      # RSRP/RSRQ/SINR/Timing Advance (precisa de rede p/ valor útil)
+python -m hal.cli --port /dev/ttyUSB2 signal      # RSRP/RSRQ (SINR/Timing Advance não disponíveis neste firmware)
 python -m hal.cli --port /dev/ttyUSB2 cell        # célula servidora (Cell-ID, PCI, TAC)
 python -m hal.cli --port /dev/ttyUSB2 neighbors   # células vizinhas (fingerprinting)
 python -m hal.cli --port /dev/ttyUSB2 gnss        # posição GNSS atual (ou "Sem fix GNSS ainda")

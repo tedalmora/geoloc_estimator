@@ -40,6 +40,18 @@ class FN990Driver(ModemDriver):
         for _ in range(2):
             time.sleep(1.0)
             self._ser.reset_input_buffer()
+        # Mesmo com o flush acima, confirmado em campo que o 1º comando de uma conexão nova
+        # ainda pode vir corrompido/vazio (mesma causa: bytes atrasados de uma varredura
+        # anterior). Em vez de só esperar e torcer, confirma ativamente: manda "AT" e só
+        # considera a conexão pronta quando a resposta vier limpa (só "OK", nada mais
+        # grudado). Se não vier limpa, flusha e tenta de novo, até um limite -- depois disso
+        # segue em frente mesmo assim (não trava o connect() para sempre).
+        for _ in range(3):
+            resposta = self.send_at("AT", timeout=2.0).strip()
+            if resposta == "OK":
+                break
+            time.sleep(0.5)
+            self._ser.reset_input_buffer()
 
     def close(self) -> None:
         if self._ser and self._ser.is_open:

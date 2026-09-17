@@ -54,6 +54,14 @@ projetada a partir da posição cadastrada (na direção do azimute, se você so
 posição fica igual à do Cell-ID puro e o TA só define um raio de incerteza). Ver
 `methods/network_position.py` para a implementação e os comentários com a fórmula.
 
+**Situação atual do `ta` (importante):** o modem em uso hoje (`FN990A28`, firmware
+`M0R.000003`) não expõe Timing Advance em nenhum comando AT simples -- `get_signal_metrics()`
+sempre devolve `timing_advance=None`, então **`ta` se comporta exatamente igual ao `cell_id`
+puro** por enquanto (distância = 0). Existe um comando dedicado (`AT#TAINFO`) só numa versão
+de firmware mais nova -- ver `planejamento/procedimento_ta_sinr_fn990.md` para a investigação
+completa e a avaliação de risco do upgrade. Não é bloqueante: o projeto já é válido com os
+outros 4 métodos, e `ta` volta a fazer sentido assim que o TA estiver disponível.
+
 ## O cadastro de posições (`network_registry.json`)
 
 Copie `network_registry.example.json` para `network_registry.json` e preencha com a posição
