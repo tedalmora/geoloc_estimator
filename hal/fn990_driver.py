@@ -31,6 +31,15 @@ class FN990Driver(ModemDriver):
     def connect(self, port: str, baudrate: int = 115200, timeout: float = 5.0) -> None:
         self._port, self._baudrate, self._timeout = port, baudrate, timeout
         self._ser = serial.Serial(port, baudrate=baudrate, timeout=timeout)
+        # Descarta qualquer sobra de uma sessão anterior -- se a porta foi fechada enquanto um
+        # #CSURV ainda estava fisicamente em andamento no modem (varredura ativa, não é
+        # instantânea), os bytes atrasados chegam só agora, na conexão NOVA, e corrompem o
+        # primeiro comando que mandarmos (chegou a substituir a resposta inteira do #MONI por
+        # texto do #CSURV numa sessão de teste real). Um flush só não bastou -- repete 2x com
+        # pausa, pra pegar bytes que ainda estavam a caminho no primeiro flush.
+        for _ in range(2):
+            time.sleep(1.0)
+            self._ser.reset_input_buffer()
 
     def close(self) -> None:
         if self._ser and self._ser.is_open:
@@ -121,8 +130,10 @@ class FN990Driver(ModemDriver):
         phyCellId 254 no #CSURV. Isso custa 1 varredura completa (`_get_csurv_records`, com
         cache curto -- ver abaixo) só na primeira vez do ciclo de poll."""
         raw = self.send_at("AT#MONI")
-        cell_id = extract_str(raw, r"Id:\s*([0-9A-Fa-f]+)")
-        tac = extract_str(raw, r"TAC:\s*([0-9A-Fa-f]+)")
+        # (?<![A-Za-z]) -- "Id:" sozinho, não o final de "cellId:" (que aparece no #CSURV;
+        # se sobras de um #CSURV vazarem pro #MONI, sem isso o regex pegava o cellId errado).
+        cell_id = extract_str(raw, r"(?<![A-Za-z])Id:\s*([0-9A-Fa-f]+)")
+        tac = extract_str(raw, r"(?<![A-Za-z])TAC:\s*([0-9A-Fa-f]+)")
         pci = self._find_pci_via_csurv(cell_id) if cell_id else None
         return ServingCell(cell_id, pci, tac)
 
@@ -144,7 +155,11 @@ class FN990Driver(ModemDriver):
             time.sleep(espera)
         raw = self.send_at("AT#CSURV", timeout=30.0)  # varredura completa -- pode demorar mais
         self._csurv_last_issue_time = time.time()
-        self._csurv_cache = re.split(r"(?=\b(?:earfcn|uarfcn|nr_arfcn):)", raw)
+        # sem \b -- confirmado em campo que às vezes um registro anterior gruda direto no
+        # próximo sem espaço/quebra de linha (ex.: "...mnc: 0earfcn: 1900 rxLev:...", visto
+        # numa captura real) -- \b falha aí porque dígito+letra não é fronteira de palavra,
+        # e o #CSURV inteiro virava 1 registro só em vez de vários.
+        self._csurv_cache = re.split(r"(?=(?:earfcn|uarfcn|nr_arfcn):)", raw)
         self._csurv_cache_time = agora
         return self._csurv_cache
 
