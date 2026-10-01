@@ -6,7 +6,8 @@ hal/parsing.py; aqui ficam só o transporte AT e a ordem dos comandos.
 
 Regras de segurança do driver:
 - nenhum comando grava configuração persistente. Em particular, não há escrita de AT$LCSLPP
-  ("Setting saved: Auto", manual p. 740): o LPP é só consultado (AT$LCSLPP?);
+  ("Setting saved: Auto", manual p. 740); o HAL não trata LPP (a consulta experimental, só
+  leitura, fica em experimental/lpp_probe.py);
 - AT$GPSP=1 só é enviado se AT$GPSP? disser que o GNSS está desligado, porque ele também
   apaga a memória do GNSS (manual p. 763);
 - o #MONI não é reconfigurado: se ficou em modo de célula adjacente, a leitura vem 'malformed'.
@@ -21,13 +22,12 @@ from .models import (
     AtResponse,
     CsurvReading,
     GnssReading,
-    LppConfigProbe,
     ModemStatus,
     MoniReading,
     PrepareResult,
     ServInfoReading,
 )
-from .parsing import parse_csurv, parse_gpsacp, parse_gpsp, parse_lpp_config, parse_moni, parse_servinfo
+from .parsing import parse_csurv, parse_gpsacp, parse_gpsp, parse_moni, parse_servinfo
 
 READ_SLICE_S = 0.2  # leitura em fatias curtas: o prazo total vale mesmo com a porta muda
 POLL_S = 0.05
@@ -203,7 +203,3 @@ class FN990Driver(ModemDriver):
 
     def read_gnss(self) -> GnssReading:
         return parse_gpsacp(self.send_at("AT$GPSACP"))
-
-    def query_lpp_config(self) -> LppConfigProbe:
-        """Sonda experimental somente leitura (AT$LCSLPP?); nenhuma escrita de configuração."""
-        return parse_lpp_config(self.send_at("AT$LCSLPP?"))

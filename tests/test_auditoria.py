@@ -1,8 +1,9 @@
 """As 59 verificações da auditoria (Etapa 1) como testes automatizados.
 
-Cada teste mantém o identificador do relatório da auditoria (B00, B01, H01...). Defeitos que já
-existiam antes da reconfiguração ficam marcados com xfail estrito e a fase que deve corrigi-los;
-quando a fase corrige o defeito, o marcador sai e o teste passa a ser obrigatório.
+Cada teste mantém o identificador do relatório da auditoria (B00, B01, H01...). Os defeitos que já
+existiam antes da reconfiguração ficaram marcados com xfail estrito até a fase que os corrigiu;
+desde a fase 7 nenhum marcador resta e todos os testes são obrigatórios. B01 importa os módulos
+ativos e os experimentais (que só existem isolados em experimental/).
 Os testes X01-X02 cobrem dois defeitos achados na auditoria fora das 59 verificações.
 """
 import ast
@@ -20,10 +21,6 @@ from support import BlockingSerial, SilentSerial, at_lines, driver_com
 from radiomapa_sintetico import LOCAL_KEY, criar_radiomapa
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-
-
-def pendente(fase):
-    return pytest.mark.xfail(reason=f"defeito pré-existente da auditoria; corrigir na fase {fase}", strict=True)
 
 
 def resposta(comando, fixture):
@@ -49,8 +46,8 @@ MODULOS_AUDITORIA = [
     "hal.models", "hal.parsing", "hal.modem_driver", "hal.fn990_driver", "hal.health", "hal.cli",
     "coletor.db", "coletor.daemon", "coletor.export_csv", "estimador.dataset", "estimador.geometry",
     "estimador.estimate", "estimador.features", "estimador.evaluate", "estimador.db",
-    "estimador.methods.cell_id", "estimador.methods.network_position", "estimador.methods.aoa",
-    "estimador.methods.fingerprint", "estimador.train", "estimador.live",
+    "estimador.methods.cell_id", "estimador.methods.fingerprint", "estimador.train", "estimador.live",
+    "experimental.timing_advance", "experimental.angular_geometry", "experimental.lpp_probe",
 ]
 
 
@@ -219,60 +216,71 @@ def test_F03_rsrp_ausente_nao_injeta_none():
     assert vectorize(celulas, _politica_lte(), ["LTE:3375:254"], -140.0) == ([-140.0], 0)
 
 
-# --------------------------------------------------------------------------- T: Timing Advance (legado)
-@pendente(7)
+# --------------------------------------------------------------------------- T: Timing Advance (experimental/)
+def _cadastro_ta():
+    from estimador.methods.cell_id import CellRegistry, RegistryEntry
+
+    chave = "LTE:72406:F560E67"
+    return chave, CellRegistry({chave: RegistryEntry(chave, -26.9, -49.07, sector_azimuth_deg=120.0)})
+
+
 def test_T01_ta_ausente_produz_unavailable():
-    from estimador.methods.network_position import CellPosition, estimate_cell_position_ta
+    from experimental.timing_advance import TaConversion, estimate_timing_advance
 
-    r = estimate_cell_position_ta(254, None, "5G", {254: CellPosition(-26.9, -49.07, 120.0)})
-    assert r is None or r.get("status") == "unavailable"
+    chave, cadastro = _cadastro_ta()
+    conversao = TaConversion("NR", "teste", 10.0, "conversão fictícia de teste")
+    r = estimate_timing_advance(None, "NR", chave, cadastro, conversao)
+    assert (r.status, r.lat, r.metadata) == ("unavailable", None, {})
 
 
-@pendente(7)
 def test_T02_incerteza_nunca_zero():
-    from estimador.methods.network_position import CellPosition, estimate_cell_position_ta
+    from experimental.timing_advance import TaConversion, estimate_timing_advance
 
-    r = estimate_cell_position_ta(254, 3, "4G", {254: CellPosition(-26.9, -49.07, 120.0)})
-    assert r is None or r.get("raio_incerteza_m") != 0.0
+    chave, cadastro = _cadastro_ta()
+    for ta in (0, 3):
+        r = estimate_timing_advance(ta, "LTE", chave, cadastro, TaConversion("LTE", "teste", 10.0, "fictícia"))
+        assert r.valid and r.metadata["range_max_m"] > 0 and r.metadata["range_max_m"] > r.metadata["range_min_m"]
+        assert (r.lat, r.lon) == (-26.9, -49.07)  # azimute do setor não desloca o ponto
 
 
-@pendente(7)
 def test_T03_sem_constante_fixa_de_ta_para_nr():
-    from estimador.methods import network_position
+    import inspect
 
-    assert "5G" not in getattr(network_position, "METROS_POR_TA", {})
+    from experimental import timing_advance
+    from experimental.timing_advance import estimate_timing_advance
+
+    chave, cadastro = _cadastro_ta()
+    assert not hasattr(timing_advance, "METROS_POR_TA") and "78.1" not in inspect.getsource(timing_advance)
+    assert estimate_timing_advance(5, "NR", chave, cadastro).status == "unsupported"
 
 
-# --------------------------------------------------------------------------- G: geometria angular (legado)
-@pendente(7)
+# --------------------------------------------------------------------------- G: geometria angular (experimental/)
 def test_G01_intersecao_atras_da_ancora_rejeitada():
-    from estimador.methods.aoa import estimate_position_from_bearings
+    from experimental.angular_geometry import intersect_bearings
 
-    with pytest.raises(ValueError):
-        estimate_position_from_bearings((0.0, 0.0), 225.0, (0.0, 0.001), 315.0)
+    r = intersect_bearings((0.0, 0.0), 225.0, (0.0, 0.001), 315.0)
+    assert r.status == "geometry_degenerate" and "atrás" in r.reason and r.lat is None
 
 
-@pendente(7)
 def test_G02_ancoras_iguais_rejeitadas():
-    from estimador.methods.aoa import estimate_position_from_bearings
+    from experimental.angular_geometry import intersect_bearings
 
-    with pytest.raises(ValueError):
-        estimate_position_from_bearings((0.0, 0.0), 0.0, (0.0, 0.0), 90.0)
+    r = intersect_bearings((0.0, 0.0), 0.0, (0.0, 0.0), 90.0)
+    assert r.status == "geometry_degenerate" and "iguais" in r.reason
 
 
-@pendente(7)
 def test_G03_bearing_nan_rejeitado():
-    from estimador.methods.aoa import estimate_position_from_bearings
+    from experimental.angular_geometry import intersect_bearings
 
-    with pytest.raises(ValueError):
-        estimate_position_from_bearings((0.0, 0.0), float("nan"), (0.0, 0.001), 90.0)
+    r = intersect_bearings((0.0, 0.0), float("nan"), (0.0, 0.001), 90.0)
+    assert r.status == "invalid_input" and r.lat is None
 
 
 def test_G04_cruzamento_ortogonal_conhecido():
-    from estimador.methods.aoa import estimate_position_from_bearings
+    from experimental.angular_geometry import intersect_bearings
 
-    lat, lon = estimate_position_from_bearings((0.0, 0.0), 90.0, (0.0009, 0.0009), 180.0)
-    assert abs(lat) < 1e-6 and abs(lon - 0.0009) < 1e-6
+    r = intersect_bearings((0.0, 0.0), 90.0, (0.0009, 0.0009), 180.0)
+    assert r.valid and abs(r.lat) < 1e-6 and abs(r.lon - 0.0009) < 1e-6
 
 
 # --------------------------------------------------------------------------- C: Coletor (schema v2)

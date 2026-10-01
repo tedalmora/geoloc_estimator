@@ -13,8 +13,8 @@ CICLO = {
     "AT#CSURV": "csurv_vivo_campo.txt",
     "AT$GPSACP": "gpsacp_fix.txt",
 }
-# Comandos que um ciclo pode enviar; nenhum grava configuração no modem.
-COMANDOS_PERMITIDOS = {"AT#MONI", "AT#SERVINFO", "AT#CSURV", "AT$GPSACP", "AT$LCSLPP?"}
+# Comandos que um ciclo pode enviar; nenhum grava configuração no modem (LPP fica fora do snapshot).
+COMANDOS_PERMITIDOS = {"AT#MONI", "AT#SERVINFO", "AT#CSURV", "AT$GPSACP"}
 
 
 def ciclo(**trocas):
@@ -81,13 +81,6 @@ def test_erro_de_porta_nao_levanta_excecao(sem_espera):
     assert s.transport_error.startswith("SERVINFO: OSError")
     assert driver._ser.written == ["AT#MONI", "AT#SERVINFO"]
     assert s.status == "partial" and "erro_de_porta" in s.reasons and s.csurv.status == "skipped"
-
-
-def test_sonda_lpp_opcional_e_somente_leitura(sem_espera):
-    driver = driver_com(ciclo(**{"AT$LCSLPP?": "lcslpp_consulta.txt"}), sem_espera)
-    s = take_snapshot(driver, include_lpp_probe=True)
-    assert driver._ser.written[-1] == "AT$LCSLPP?" and set(driver._ser.written) <= COMANDOS_PERMITIDOS
-    assert s.lpp_probe.status == "ok" and s.status == "complete"
 
 
 def test_snapshot_nsa_guarda_perna_nr(sem_espera):

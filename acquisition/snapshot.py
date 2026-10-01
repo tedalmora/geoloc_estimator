@@ -4,8 +4,9 @@
 medição ao vivo (estimador/live.py) estima a posição a partir dele.
 
 Ordem dos comandos: #MONI e #SERVINFO em seguida, para reduzir a chance de a servidora mudar
-entre os dois; depois #CSURV (até 3 min); por fim $GPSACP e, se pedido, a sonda LPP somente
-leitura. Exatamente 1 #CSURV por snapshot. Nenhum comando grava configuração no modem.
+entre os dois; depois #CSURV (até 3 min); por fim $GPSACP. Exatamente 1 #CSURV por snapshot.
+Nenhum comando grava configuração no modem. O LPP não faz parte do snapshot (sonda experimental
+separada em experimental/lpp_probe.py).
 
 Status do snapshot:
 - complete: todas as leituras 'ok' e a servidora com radio_key e global_cell_key;
@@ -13,7 +14,7 @@ Status do snapshot:
 - invalid: nenhuma observação de célula (modem mudo, erro de porta, todas as leituras falharam).
 
 Uso (a partir de `codigo/`):
-    python -m acquisition.snapshot --port /dev/ttyUSB2 [--lpp-probe] [--no-prepare]
+    python -m acquisition.snapshot --port /dev/ttyUSB2 [--no-prepare]
 """
 import argparse
 import dataclasses
@@ -33,7 +34,6 @@ from hal.models import (
     CellObservation,
     CsurvReading,
     GnssReading,
-    LppConfigProbe,
     MoniReading,
     ServingCellResolution,
     ServInfoReading,
@@ -61,7 +61,6 @@ class Snapshot:
     servinfo: ServInfoReading
     csurv: CsurvReading
     gnss: GnssReading
-    lpp_probe: Optional[LppConfigProbe] = None
     timings_s: Dict[str, float] = field(default_factory=dict)  # latência por comando e 'total'
     anomalies: List[str] = field(default_factory=list)
     transport_error: Optional[str] = None
@@ -71,7 +70,7 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def take_snapshot(driver: ModemDriver, include_lpp_probe: bool = False) -> Snapshot:
+def take_snapshot(driver: ModemDriver) -> Snapshot:
     """Executa 1 ciclo de leitura. Não levanta exceção por falha do modem ou da porta: a falha
     vira status/motivo no snapshot (erro de porta interrompe os comandos seguintes)."""
     started_at = utc_now_iso()
@@ -82,8 +81,6 @@ def take_snapshot(driver: ModemDriver, include_lpp_probe: bool = False) -> Snaps
         ("CSURV", driver.scan_cells, CsurvReading),
         ("GNSS", driver.read_gnss, GnssReading),
     ]
-    if include_lpp_probe:
-        steps.append(("LPP", driver.query_lpp_config, LppConfigProbe))
 
     readings = {}
     transport_error: Optional[str] = None
@@ -139,7 +136,7 @@ def take_snapshot(driver: ModemDriver, include_lpp_probe: bool = False) -> Snaps
         serving_rsrq_db=primary.rsrq_db if primary else None,
         serving_sinr_db=primary.sinr_db if primary else None,
         observations=observations, moni=moni, servinfo=servinfo, csurv=csurv, gnss=gnss,
-        lpp_probe=readings.get("LPP"), timings_s=timings, anomalies=anomalies, transport_error=transport_error,
+        timings_s=timings, anomalies=anomalies, transport_error=transport_error,
     )
 
 
@@ -149,8 +146,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Tira 1 snapshot do modem e imprime em JSON")
     parser.add_argument("--port", required=True, help="ex.: /dev/ttyUSB2")
     parser.add_argument("--baudrate", type=int, default=115200)
-    parser.add_argument("--lpp-probe", dest="lpp_probe", action="store_true",
-                        help="inclui a sonda experimental somente leitura AT$LCSLPP?")
     parser.add_argument("--no-prepare", dest="prepare", action="store_false",
                         help="não consulta/liga o GNSS antes do snapshot")
     args = parser.parse_args()
@@ -161,7 +156,7 @@ def main() -> None:
         saida = {}
         if args.prepare:
             saida["prepare"] = to_jsonable(driver.prepare_for_collection())
-        saida["snapshot"] = to_jsonable(take_snapshot(driver, include_lpp_probe=args.lpp_probe))
+        saida["snapshot"] = to_jsonable(take_snapshot(driver))
         print(json.dumps(saida, indent=2, ensure_ascii=False, default=str))
     finally:
         driver.close()

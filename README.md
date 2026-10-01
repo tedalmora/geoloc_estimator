@@ -24,8 +24,7 @@ codigo/
         methods/
             cell_id.py            # Cell-ID por global_cell_key + validação do cadastro (baseline)
             fingerprint.py        # Fingerprinting WKNN (Python puro, bundle JSON) -- único com treino
-            network_position.py  # Cell-ID + TA -- legado, revisto na fase 7
-            aoa.py                 # DL-AoD/UL-AoA (geometria pura) -- legado, revisto na fase 7
+    experimental/     # TA, sonda LPP e geometria de bearings; fora do caminho principal, não validados
     deprecated/       # histórico (compare/infer/relatorio antigos); nada ativo importa daqui
     requirements.txt      # runtime do alvo: só pyserial (HAL, aquisição, Coletor, Estimador)
     requirements-dev.txt  # PC de desenvolvimento: pytest
@@ -57,8 +56,8 @@ responder "onde estou agora".
 |---|---|---|---|
 | Cell-ID (`global_cell_key` → posição cadastrada da célula) | principal (baseline) | Para avaliar, sim | `estimador.live cell-id`; `estimador.evaluate cell-id`/`compare` |
 | Fingerprinting WKNN | principal | **Sim** | `estimador.train` (offline), `estimador.evaluate compare`, `estimador.live wknn` |
-| Cell-ID + Timing Advance | legado, fase 7 | Não | fora do `live.py`; o firmware atual não expõe TA (ver `hal/README.md`) |
-| DL-AoD / UL-AoA | legado, fase 7 | Não | fora do `live.py`; não há ângulos medidos (ver `hal/README.md`) |
+| Cell-ID + Timing Advance | experimental (`experimental/timing_advance.py`) | Não | sem TA real: `unavailable`; o firmware atual não expõe TA (ver `hal/README.md`) |
+| Geometria de bearings (DL-AoD/UL-AoA) | experimental (`experimental/angular_geometry.py`) | Não | só com ângulos externos; nenhum ângulo real foi obtido |
 
 ---
 
@@ -130,8 +129,7 @@ python -m hal.cli --port /dev/ttyUSB2 moni        # célula servidora LTE/NR e m
 python -m hal.cli --port /dev/ttyUSB2 servinfo    # PLMN da servidora (AT#SERVINFO)
 python -m hal.cli --port /dev/ttyUSB2 csurv       # varredura de células com radio_key/global_cell_key (AT#CSURV, até 3 min)
 python -m hal.cli --port /dev/ttyUSB2 gnss        # AT$GPSACP: fix 2D/3D, HDOP, satélites, UTC
-python -m hal.cli --port /dev/ttyUSB2 lpp-config  # sonda experimental somente leitura (AT$LCSLPP?)
-python -m hal.cli --port /dev/ttyUSB2 reboot      # reinicia o módulo (AT#REBOOT)
+python -m hal.cli --port /dev/ttyUSB2 reboot      # ALTERA ESTADO: reinicia o módulo (AT#REBOOT)
 ```
 
 Cada comando imprime a leitura em JSON com `status` e a resposta crua. Os formatos foram
@@ -143,7 +141,6 @@ Para ver um ciclo completo, como o Coletor e o `live.py` leem o modem:
 
 ```bash
 python -m acquisition.snapshot --port /dev/ttyUSB2               # prepare + 1 snapshot em JSON
-python -m acquisition.snapshot --port /dev/ttyUSB2 --lpp-probe   # inclui a sonda AT$LCSLPP? (só leitura)
 ```
 
 O snapshot sai `complete`, `partial` ou `invalid`, com os motivos (`reasons`) e a latência de
@@ -174,8 +171,6 @@ python -m coletor.daemon once --port /dev/ttyUSB2 --db radiomapa_v2.db \
 # Contínuo: 1 snapshot a cada --interval segundos (grade monotônica), até o limite ou Ctrl+C
 python -m coletor.daemon continuous --port /dev/ttyUSB2 --db radiomapa_v2.db --interval 60 \
     --scenario pedestre --environment outdoor --route trilha_1 --campaign-plmn 72406
-
-# Qualquer sessão aceita --lpp-probe (sonda experimental somente leitura de AT$LCSLPP?)
 ```
 
 - `--scenario`: `estatico` | `pedestre` | `veicular`

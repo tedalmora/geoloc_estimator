@@ -9,8 +9,8 @@ continua precisando apenas do `pyserial`):
 - **Fingerprinting WKNN** (`methods/fingerprint.py`): RSRP das células do `#CSURV` por
   `radio_key`, treinado offline com o radiomapa v2 do [Coletor](../coletor/README.md).
 
-TA, AoA/LPP e geometria angular (`methods/network_position.py`, `methods/aoa.py`) continuam
-legados e são revistos na fase 7. Os scripts antigos `compare.py`, `infer.py` e `relatorio.py`
+TA, LPP e geometria de bearings ficam isolados em [`../experimental/`](../experimental/), fora do
+caminho principal. Os scripts antigos `compare.py`, `infer.py` e `relatorio.py`
 foram para [`../deprecated/`](../deprecated/README.md).
 
 ```
@@ -27,8 +27,6 @@ estimador/
     methods/
         cell_id.py           # Cell-ID + validação do cadastro
         fingerprint.py       # runtime WKNN; validação, leitura e gravação do bundle
-        network_position.py  # TA legado (fase 7)
-        aoa.py               # AoA legado (fase 7)
 ```
 
 ## Dados de entrada (`dataset.py`)

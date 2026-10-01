@@ -5,9 +5,9 @@ guardada no banco) e devolvem leituras tipadas. Assim são testáveis sem hardwa
 reprocessar coletas antigas quando um parser mudar.
 
 Formatos conferidos no manual 80691ST11097A Rev.5 (2025-10-20): #MONI §4.2.31 (pp. 306-314),
-#SERVINFO §4.2.16 (pp. 249-251), #CSURV §4.14.1 (pp. 814-820), $GPSACP §4.11.5.3 (pp. 783-786),
-$GPSP §4.11.2.3 (pp. 763-764) e $LCSLPP §4.11.1.14 (pp. 740-742). Onde o campo contradiz o
-manual, vale o campo, e a divergência fica anotada junto do parser.
+#SERVINFO §4.2.16 (pp. 249-251), #CSURV §4.14.1 (pp. 814-820), $GPSACP §4.11.5.3 (pp. 783-786) e
+$GPSP §4.11.2.3 (pp. 763-764). Onde o campo contradiz o manual, vale o campo, e a divergência
+fica anotada junto do parser.
 """
 import csv
 import re
@@ -36,7 +36,6 @@ from .models import (
     CsurvReading,
     GnssFix,
     GnssReading,
-    LppConfigProbe,
     MoniReading,
     ServingCellResolution,
     ServInfoReading,
@@ -437,18 +436,6 @@ def parse_gpsp(resp: AtResponse) -> Optional[int]:
         if match:
             return int(match.group(1))
     return None
-
-
-# ---------------------------------------------------------------- LPP (sonda experimental)
-def parse_lpp_config(resp: AtResponse) -> LppConfigProbe:
-    """Só registra o texto cru e a situação de AT$LCSLPP? (sem interpretar nada)."""
-    status = _failure(resp)
-    if status is None:
-        if any(line.startswith("$LCSLPP:") for line in resp.lines):
-            status = READ_OK
-        else:
-            status = READ_MALFORMED if resp.lines else READ_EMPTY
-    return LppConfigProbe(status=status, raw_text=resp.raw_text, response=resp)
 
 
 # ---------------------------------------------------------------- célula servidora

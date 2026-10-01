@@ -11,7 +11,7 @@ Não há laço, sessão nem banco de dados. Quem chama o HAL é a aquisição co
 ```
 hal/
     models.py         # observações de célula, chaves de identidade, leituras, AtResponse
-    parsing.py        # parsers puros (#MONI, #SERVINFO, #CSURV, $GPSACP, $GPSP?, $LCSLPP?) e cruzamento da servidora
+    parsing.py        # parsers puros (#MONI, #SERVINFO, #CSURV, $GPSACP, $GPSP?) e cruzamento da servidora
     modem_driver.py   # contrato comum dos drivers
     fn990_driver.py   # transporte AT e comandos do Telit Cinterion FN990
     health.py         # contagem de falhas seguidas para decidir reconexão
@@ -43,8 +43,7 @@ hexadecimal maiúsculo; o `#CSURV` os informa em decimal e o parser converte.
 | `read_serving_info()` | `#SERVINFO` | `ServInfoReading` | traz o PLMN da servidora |
 | `scan_cells()` | `#CSURV` | `CsurvReading` | até 3 min; todas as células LTE/NR, inclusive de outras operadoras e `CELL_FORBIDDEN` |
 | `read_gnss()` | `$GPSACP` | `GnssReading` | fix 2D/3D com HDOP, satélites e UTC; fix 0/1 = sem posição |
-| `query_lpp_config()` | `$LCSLPP?` | `LppConfigProbe` | sonda experimental, só leitura: texto cru e status |
-| `reboot()` | `#REBOOT` | — | fecha a porta local |
+| `reboot()` | `#REBOOT` | — | **altera estado**: reinicia o modem e fecha a porta local |
 
 O `#MONI` e o `#SERVINFO` não informam o PCI da servidora LTE. `parsing.resolve_serving_cell()`
 (função pura) cruza o Cell-ID da servidora com os registros completos do `#CSURV`. Se houver
@@ -53,9 +52,11 @@ exatamente um registro compatível, as duas chaves vêm desse registro. Caso con
 
 ## O que o HAL não faz
 
-- Não grava configuração persistente. Não há escrita de `AT$LCSLPP` (o manual indica
-  "Setting saved: Auto"), e o `#MONI` não é reconfigurado: o formato de célula adjacente vira
-  `malformed`.
+- Não grava configuração persistente, e o `#MONI` não é reconfigurado: o formato de célula
+  adjacente vira `malformed`.
+- Não trata LPP. A consulta experimental somente leitura `AT$LCSLPP?` fica em
+  `experimental/lpp_probe.py`; a escrita de `AT$LCSLPP` não existe em nenhum módulo (o manual
+  indica "Setting saved: Auto").
 - Não mede ângulo nem RSTD: o manual não documenta comando AT que devolva DL-AoD, UL-AoA ou RSTD.
 - Não lê nem converte Timing Advance. O `#TAINFO` não existe no firmware de campo e o manual
   não documenta a unidade.
@@ -71,8 +72,7 @@ python -m hal.cli --port /dev/ttyUSB2 moni
 python -m hal.cli --port /dev/ttyUSB2 servinfo
 python -m hal.cli --port /dev/ttyUSB2 csurv
 python -m hal.cli --port /dev/ttyUSB2 gnss
-python -m hal.cli --port /dev/ttyUSB2 lpp-config
-python -m hal.cli --port /dev/ttyUSB2 reboot
+python -m hal.cli --port /dev/ttyUSB2 reboot      # ALTERA ESTADO: reinicia o modem
 ```
 
 ## Testes automatizados

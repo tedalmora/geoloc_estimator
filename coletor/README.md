@@ -52,8 +52,6 @@ python -m coletor.daemon once --port /dev/ttyUSB2 --db radiomapa_v2.db \
 # snapshots a cada 60 s (grade monotônica), até --max-measurements/--duration-s ou Ctrl+C
 python -m coletor.daemon continuous --port /dev/ttyUSB2 --db radiomapa_v2.db --interval 60 \
     --scenario pedestre --environment outdoor --route trilha_1 --campaign-plmn 72406
-
-# qualquer sessão aceita --lpp-probe (sonda experimental somente leitura de AT$LCSLPP?)
 ```
 
 `--campaign-plmn` registra a operadora da campanha (MCC+MNC). As células de outras operadoras
@@ -71,7 +69,9 @@ Nenhuma configuração persistente do modem é alterada.
 | `observed_cells` | 1 linha por célula observada: fonte (`MONI`, `SERVINFO`, `CSURV`, `LEGACY_V1`), RAT, ARFCN, PCI, PLMN, Cell-ID, TAC, medidas, `cell_status`, `radio_key`, `global_cell_key`, `identity_status` |
 | `health_checks` | eventos de saúde ligados à sessão |
 
-Um banco v1 (antigo) é recusado com instruções, sem nenhuma alteração.
+Um banco v1 (antigo) é recusado com instruções, sem nenhuma alteração. A coluna
+`measurements.lpp_probe_status` continua no schema v2, sempre vazia: a sonda LPP saiu do Coletor
+na fase 7 e fica só em `experimental/lpp_probe.py`.
 
 ## Export completo e restauração
 

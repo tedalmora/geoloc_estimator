@@ -71,7 +71,6 @@ def _session_metadata(args: argparse.Namespace, driver: ModemDriver, prepare) ->
         "port": args.port,
         "baudrate": args.baudrate,
         "interval_s": getattr(args, "interval", None),
-        "lpp_probe": args.lpp_probe,
         "device_model": _device_model(),
         "platform": platform.platform(),
         "python": platform.python_version(),
@@ -117,8 +116,8 @@ def _install_handlers(stop: _StopFlag) -> dict:
     return previous
 
 
-def _collect(conn, driver: ModemDriver, session_id: int, seq: int, point_id: Optional[int], lpp_probe: bool) -> Snapshot:
-    snap = take_snapshot(driver, include_lpp_probe=lpp_probe)
+def _collect(conn, driver: ModemDriver, session_id: int, seq: int, point_id: Optional[int]) -> Snapshot:
+    snap = take_snapshot(driver)
     db.insert_snapshot(conn, session_id, seq, snap, point_id)
     motivos = f" motivos={','.join(snap.reasons)}" if snap.reasons else ""
     print(f"[{snap.started_at}] #{seq} {snap.status} {snap.access_mode} servidora={snap.serving.radio_key or '-'} "
@@ -135,7 +134,7 @@ def _loop(args, driver: ModemDriver, conn, session_id: int, point_id: Optional[i
     seq = 0
     while not stop.event.is_set():
         seq += 1
-        snap = _collect(conn, driver, session_id, seq, point_id, args.lpp_probe)
+        snap = _collect(conn, driver, session_id, seq, point_id)
         alive = snapshot_alive(snap)
         now = time.monotonic()
         if alive != alive_before:
@@ -196,7 +195,7 @@ def run_session(args: argparse.Namespace, driver: ModemDriver, conn, stop: _Stop
     status, reason = "error", None
     try:
         if args.command == "once":
-            snap = _collect(conn, driver, session_id, 1, point_id, args.lpp_probe)
+            snap = _collect(conn, driver, session_id, 1, point_id)
             if not snapshot_alive(snap):
                 db.insert_health_check(conn, session_id, args.modem_id, "failure", False,
                                        snap.transport_error or ",".join(snap.reasons))
@@ -244,8 +243,6 @@ def build_parser() -> argparse.ArgumentParser:
         where.add_argument("--route", help="nome da rota (medição em movimento)")
         p.add_argument("--campaign-plmn", dest="campaign_plmn", type=_plmn, help="operadora da campanha, ex.: 72406")
         p.add_argument("--notes")
-        p.add_argument("--lpp-probe", dest="lpp_probe", action="store_true",
-                       help="inclui a sonda experimental somente leitura AT$LCSLPP?")
         if name == "continuous":
             p.add_argument("--interval", type=float, default=DEFAULT_INTERVAL_S, help="segundos entre inícios de ciclo")
             p.add_argument("--health-interval", dest="health_interval", type=float, default=DEFAULT_HEALTH_INTERVAL_S)

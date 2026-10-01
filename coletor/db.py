@@ -315,7 +315,7 @@ def insert_snapshot(
         "serving_rsrp_dbm": snap.serving_rsrp_dbm, "serving_rsrq_db": snap.serving_rsrq_db,
         "serving_sinr_db": snap.serving_sinr_db, "moni_status": snap.moni.status,
         "servinfo_status": snap.servinfo.status, "csurv_status": snap.csurv.status,
-        "gnss_status": snap.gnss.status, "lpp_probe_status": snap.lpp_probe.status if snap.lpp_probe else None,
+        "gnss_status": snap.gnss.status,
         "gnss_lat": fix.lat if fix else None, "gnss_lon": fix.lon if fix else None,
         "gnss_alt_m": fix.alt_m if fix else None, "gnss_fix_type": fix.fix_type if fix else None,
         "gnss_hdop": fix.hdop if fix else None, "gnss_nsat": fix.nsat if fix else None,
@@ -324,7 +324,6 @@ def insert_snapshot(
         "raw_json": json.dumps({
             "MONI": _raw_response(snap.moni), "SERVINFO": _raw_response(snap.servinfo),
             "CSURV": _raw_response(snap.csurv), "GNSS": _raw_response(snap.gnss),
-            "LPP": _raw_response(snap.lpp_probe),
         }, ensure_ascii=False),
     }
     with conn:

@@ -161,14 +161,6 @@ def test_prepare_nao_liga_gnss_se_a_consulta_falhar(sem_espera):
     assert driver._ser.written == ["AT$GPSP?"] and r.gnss_power_before is None
 
 
-def test_lpp_config_e_so_consulta(sem_espera):
-    driver = driver_com({"AT$LCSLPP?": "lcslpp_consulta.txt"}, sem_espera)
-    sonda = driver.query_lpp_config()
-    assert driver._ser.written == ["AT$LCSLPP?"]
-    assert sonda.status == "ok" and "$LCSLPP: 3" in sonda.raw_text
-    assert {f.name for f in dataclasses.fields(sonda)} == {"status", "raw_text", "response"}
-
-
 def test_codigo_ativo_nao_grava_lcslpp():
     ativos = [p for p in ROOT.rglob("*.py") if not {"venv", ".venv", "tests", "deprecated"} & set(p.relative_to(ROOT).parts)]
     assert [str(p) for p in ativos if re.search(r"LCSLPP\s*=", p.read_text(encoding="utf-8"))] == []

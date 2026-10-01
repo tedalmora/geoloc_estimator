@@ -258,16 +258,6 @@ class GnssReading:
 
 
 @dataclass
-class LppConfigProbe:
-    """Sonda experimental, somente leitura, de AT$LCSLPP? (configuração do LPP para A-GNSS,
-    manual §4.11.1.14). Guarda só o texto cru e a situação da consulta. O manual não documenta
-    comando AT que devolva ângulo (DL-AoD/UL-AoA) nem RSTD, então nada disso é extraído aqui."""
-    status: str
-    raw_text: str = ""
-    response: Optional[AtResponse] = None
-
-
-@dataclass
 class PrepareResult:
     """O que prepare_for_collection() encontrou e fez."""
     gnss_power_before: Optional[int]  # resposta de AT$GPSP? (0 desligado, 1 ligado) ou None

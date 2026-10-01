@@ -265,7 +265,7 @@ def banco_com_dados(monkeypatch, tmp_path, sem_espera):
     banco = str(tmp_path / "dados.db")
     rodar(monkeypatch, CICLO, sem_espera, "once", "--port", "P", "--db", banco, *SESSAO_PONTO, "--notes", "linha 1\nlinha 2")
     rodar(monkeypatch, dict(CICLO, **{"AT$GPSACP": "gpsacp_sem_fix.txt"}), sem_espera, "continuous", "--port", "P",
-          "--db", banco, *SESSAO_ROTA, "--interval", "0", "--max-measurements", "2", "--lpp-probe")
+          "--db", banco, *SESSAO_ROTA, "--interval", "0", "--max-measurements", "2")
     return banco
 
 

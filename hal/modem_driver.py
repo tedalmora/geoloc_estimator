@@ -9,11 +9,9 @@ from abc import ABC, abstractmethod
 from typing import Optional
 
 from .models import (
-    READ_UNSUPPORTED,
     AtResponse,
     CsurvReading,
     GnssReading,
-    LppConfigProbe,
     ModemStatus,
     MoniReading,
     PrepareResult,
@@ -65,10 +63,6 @@ class ModemDriver(ABC):
     @abstractmethod
     def read_gnss(self) -> GnssReading:
         ...
-
-    def query_lpp_config(self) -> LppConfigProbe:
-        """Sonda experimental somente leitura da configuração LPP; padrão: não suportada."""
-        return LppConfigProbe(status=READ_UNSUPPORTED)
 
     def reconnect(self) -> None:
         """Fecha e reabre com os parâmetros guardados por connect() (_port/_baudrate/_timeout)."""

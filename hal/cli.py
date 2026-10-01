@@ -9,8 +9,7 @@ chaves das células e resposta crua). Uso (a partir da pasta `codigo/`):
     python -m hal.cli --port /dev/ttyUSB2 servinfo     # PLMN da servidora (AT#SERVINFO)
     python -m hal.cli --port /dev/ttyUSB2 csurv        # varredura (AT#CSURV, até 3 min)
     python -m hal.cli --port /dev/ttyUSB2 gnss         # AT$GPSACP
-    python -m hal.cli --port /dev/ttyUSB2 lpp-config   # sonda experimental, só leitura (AT$LCSLPP?)
-    python -m hal.cli --port /dev/ttyUSB2 reboot
+    python -m hal.cli --port /dev/ttyUSB2 reboot       # ALTERA ESTADO: reinicia o modem
 """
 import argparse
 import json
@@ -18,7 +17,7 @@ import json
 from .fn990_driver import FN990Driver
 from .models import to_jsonable
 
-COMMANDS = ("alive", "status", "prepare", "moni", "servinfo", "csurv", "gnss", "lpp-config", "reboot")
+COMMANDS = ("alive", "status", "prepare", "moni", "servinfo", "csurv", "gnss", "reboot")
 
 
 def _print(obj) -> None:
@@ -49,8 +48,6 @@ def main() -> None:
             _print(driver.scan_cells())
         elif args.comando == "gnss":
             _print(driver.read_gnss())
-        elif args.comando == "lpp-config":
-            _print(driver.query_lpp_config())
         elif args.comando == "reboot":
             driver.reboot()
             print("Comando de reboot enviado; a porta serial foi fechada localmente.")
