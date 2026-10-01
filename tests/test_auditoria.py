@@ -15,7 +15,7 @@ import time
 
 import pytest
 
-from support import BlockingSerial, ScriptedSerial, SilentSerial, at_lines
+from support import BlockingSerial, SilentSerial, at_lines, driver_com
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -24,12 +24,10 @@ def pendente(fase):
     return pytest.mark.xfail(reason=f"defeito pré-existente da auditoria; corrigir na fase {fase}", strict=True)
 
 
-def driver_com(respostas):
-    import hal.fn990_driver as fd
+def resposta(comando, fixture):
+    from hal.models import AtResponse
 
-    driver = fd.FN990Driver()
-    driver._ser = ScriptedSerial({cmd: at_lines(arq) for cmd, arq in respostas.items()})
-    return driver
+    return AtResponse.from_raw(comando, at_lines(fixture))
 
 
 # --------------------------------------------------------------------------- B: base
@@ -60,117 +58,123 @@ def test_B01_import(modulo):
 
 
 # --------------------------------------------------------------------------- H: transporte AT
-@pendente(2)
 def test_H01_send_at_respeita_o_prazo_pedido():
     import hal.fn990_driver as fd
 
     driver = fd.FN990Driver()
     driver._ser = BlockingSerial(timeout=5.0)
     inicio = time.monotonic()
-    driver.send_at("AT", timeout=2.0)
-    assert time.monotonic() - inicio < 2.5
+    resp = driver.send_at("AT", timeout=2.0)
+    assert time.monotonic() - inicio < 2.5 and resp.timed_out
 
 
-@pendente(2)
 def test_H02_connect_falha_se_at_nunca_responde(monkeypatch, sem_espera):
     import hal.fn990_driver as fd
 
-    monkeypatch.setattr(fd.serial, "Serial", SilentSerial)
+    monkeypatch.setattr(fd.serial, "Serial", lambda *a, **k: SilentSerial(clock=sem_espera, **k))
     with pytest.raises(ConnectionError):
         fd.FN990Driver().connect("PORTA_FALSA")
 
 
 # --------------------------------------------------------------------------- P: parsing
 def test_P01_moni_lte(sem_espera):
-    s = driver_com({"AT#MONI": "moni_lte.txt"}).get_signal_metrics()
-    assert (s.technology, s.rsrp_dbm, s.rsrq_db) == ("4G", -107.0, -12.0)
+    m = driver_com({"AT#MONI": "moni_lte.txt"}, sem_espera).read_serving_cell()
+    assert (m.status, m.access_mode, m.lte.rsrp_dbm, m.lte.rsrq_db) == ("ok", "LTE", -107.0, -12.0)
 
 
-@pendente(2)
 def test_P02_moni_endc_vira_nr_nsa(sem_espera):
-    s = driver_com({"AT#MONI": "moni_endc_nr_conectado.txt"}).get_signal_metrics()
-    assert s.technology == "NR_NSA"
+    m = driver_com({"AT#MONI": "moni_endc_nr_conectado.txt"}, sem_espera).read_serving_cell()
+    assert m.access_mode == "NR_NSA"
 
 
-@pendente(2)
 def test_P03_moni_nr_sa_identifica_servidora(sem_espera):
-    c = driver_com({"AT#MONI": "moni_nr_sa.txt"}).get_serving_cell()
-    assert c.pci == 123
+    m = driver_com({"AT#MONI": "moni_nr_sa.txt"}, sem_espera).read_serving_cell()
+    assert (m.access_mode, m.nr.pci, m.nr.radio_key) == ("NR_SA", 123, "NR:629952:123")
 
 
-@pendente(2)
 def test_P04_cme_error_vira_unknown(sem_espera):
-    s = driver_com({"AT#MONI": "cme_error_4.txt"}).get_signal_metrics()
-    assert s.technology == "UNKNOWN"
+    m = driver_com({"AT#MONI": "cme_error_4.txt"}, sem_espera).read_serving_cell()
+    assert (m.status, m.access_mode, m.response.error_code) == ("error", "UNKNOWN", 4)
 
 
-@pendente(2)
 def test_P05_resposta_vazia_vira_unknown(sem_espera):
-    s = driver_com({"AT#MONI": "vazio.txt"}).get_signal_metrics()
-    assert s.technology == "UNKNOWN"
+    m = driver_com({"AT#MONI": "vazio.txt"}, sem_espera).read_serving_cell()
+    assert (m.status, m.access_mode) == ("timeout", "UNKNOWN")
 
 
-def test_P06_pci_da_servidora_por_cruzamento(sem_espera):
-    c = driver_com({"AT#MONI": "moni_lte.txt", "AT#CSURV": "csurv_vivo_campo.txt"}).get_serving_cell()
-    assert (c.cell_id, c.pci) == ("F560E67", 254)
+def test_P06_pci_da_servidora_por_cruzamento():
+    from hal.parsing import parse_csurv, parse_moni, parse_servinfo, resolve_serving_cell
+
+    r = resolve_serving_cell(
+        parse_moni(resposta("AT#MONI", "moni_lte.txt")),
+        parse_servinfo(resposta("AT#SERVINFO", "servinfo_lte.txt")),
+        parse_csurv(resposta("AT#CSURV", "csurv_vivo_campo.txt")).observations,
+    )
+    assert (r.cell_id, r.pci, r.radio_key, r.global_cell_key) == ("F560E67", 254, "LTE:3375:254", "LTE:72406:F560E67")
 
 
-@pendente(2)
-def test_P07_csurv_preserva_arfcn(sem_espera):
-    obs = driver_com({"AT#CSURV": "csurv_manual_exemplo.txt"}).get_neighbor_cells()
+def test_P07_csurv_preserva_arfcn():
+    from hal.parsing import parse_csurv
+
+    obs = parse_csurv(resposta("AT#CSURV", "csurv_manual_exemplo.txt")).observations
     assert {o.arfcn for o in obs if o.pci == 64} == {2850, 1350, 3200}
 
 
-@pendente(2)
-def test_P08_csurv_aproveita_registro_nr(sem_espera):
-    obs = driver_com({"AT#CSURV": "csurv_manual_exemplo.txt"}).get_neighbor_cells()
-    assert 639 in [o.pci for o in obs]
+def test_P08_csurv_aproveita_registro_nr():
+    from hal.parsing import parse_csurv
+
+    obs = parse_csurv(resposta("AT#CSURV", "csurv_manual_exemplo.txt")).observations
+    assert "NR:636672:639" in [o.radio_key for o in obs]
 
 
 def test_P09_gpsacp_com_fix(sem_espera):
-    g = driver_com({"AT$GPSACP": "gpsacp_fix.txt"}).get_gnss_fix()
+    g = driver_com({"AT$GPSACP": "gpsacp_fix.txt"}, sem_espera).read_gnss().fix
     assert math.isclose(g.lat, 37.52172767, abs_tol=1e-6) and math.isclose(g.lon, 126.92969693, abs_tol=1e-6)
 
 
-@pendente(2)
 def test_P10_gpsacp_preserva_hdop_e_satelites(sem_espera):
-    g = driver_com({"AT$GPSACP": "gpsacp_fix.txt"}).get_gnss_fix()
+    g = driver_com({"AT$GPSACP": "gpsacp_fix.txt"}, sem_espera).read_gnss().fix
     assert (g.hdop, g.nsat) == (0.8, 18)
 
 
 def test_P11_gpsacp_sem_fix(sem_espera):
-    assert driver_com({"AT$GPSACP": "gpsacp_sem_fix.txt"}).get_gnss_fix() is None
+    g = driver_com({"AT$GPSACP": "gpsacp_sem_fix.txt"}, sem_espera).read_gnss()
+    assert (g.status, g.fix) == ("no_fix", None)
 
 
-@pendente(2)
 def test_P12_gpsacp_fix_invalido_rejeitado(sem_espera):
-    assert driver_com({"AT$GPSACP": "gpsacp_fix_invalido.txt"}).get_gnss_fix() is None
+    g = driver_com({"AT$GPSACP": "gpsacp_fix_invalido.txt"}, sem_espera).read_gnss()
+    assert (g.status, g.fix) == ("no_fix", None)
 
 
 def test_P13_gpsacp_motor_desligado(sem_espera):
-    assert driver_com({"AT$GPSACP": "gpsacp_motor_desligado.txt"}).get_gnss_fix() is None
+    g = driver_com({"AT$GPSACP": "gpsacp_motor_desligado.txt"}, sem_espera).read_gnss()
+    assert (g.status, g.fix) == ("off", None)
 
 
-def test_P14_csurv_registros_colados(sem_espera):
-    obs = driver_com({"AT#CSURV": "csurv_registros_colados.txt"}).get_neighbor_cells()
-    assert [o.pci for o in obs] == [254]
+def test_P14_csurv_registros_colados():
+    from hal.parsing import parse_csurv
+
+    obs = parse_csurv(resposta("AT#CSURV", "csurv_registros_colados.txt")).observations
+    assert [o.radio_key for o in obs] == [None, "LTE:3375:254"]
 
 
-def test_P15_csurv_uma_vez_por_ciclo(sem_espera):
-    driver = driver_com({"AT#MONI": "moni_lte.txt", "AT#CSURV": "csurv_vivo_campo.txt"})
-    driver.get_serving_cell()
-    driver.get_neighbor_cells()
-    assert driver._ser.written.count("AT#CSURV") == 1
+def test_P15_leitura_da_servidora_nao_dispara_csurv(sem_espera):
+    # O cruzamento do PCI é uma função pura; a aquisição (fase 3) roda 1 #CSURV por ciclo.
+    driver = driver_com({"AT#MONI": "moni_lte.txt"}, sem_espera)
+    driver.read_serving_cell()
+    assert driver._ser.written == ["AT#MONI"]
 
 
-@pendente(2)
 def test_X01_gpsacp_malformado_nao_derruba_a_leitura(sem_espera):
-    assert driver_com({"AT$GPSACP": "gpsacp_malformado.txt"}).get_gnss_fix() is None
+    g = driver_com({"AT$GPSACP": "gpsacp_malformado.txt"}, sem_espera).read_gnss()
+    assert (g.status, g.fix) == ("malformed", None)
 
 
-@pendente(2)
-def test_X02_csurv_rsrp_zero_e_ausente(sem_espera):
-    obs = driver_com({"AT#CSURV": "csurv_valor_nao_coletado.txt"}).get_neighbor_cells()
+def test_X02_csurv_rsrp_zero_e_ausente():
+    from hal.parsing import parse_csurv
+
+    obs = parse_csurv(resposta("AT#CSURV", "csurv_valor_nao_coletado.txt")).observations
     assert [o.rsrp_dbm for o in obs if o.pci == 254] == [None]
 
 
@@ -257,41 +261,13 @@ def test_G04_cruzamento_ortogonal_conhecido():
 
 
 # --------------------------------------------------------------------------- C: Coletor (schema v1)
-class _DriverV1:
-    """Driver falso com a interface antiga (get_signal_metrics/get_serving_cell/...)."""
-
-    def __init__(self, technology="4G", falha=None):
-        self.technology = technology
-        self.falha = falha
-
-    def is_alive(self):
-        return True
-
-    def get_signal_metrics(self):
-        from hal.models import SignalMetrics
-
-        if self.falha:
-            raise self.falha
-        return SignalMetrics(self.technology, -107.0, -12.0, None, None)
-
-    def get_serving_cell(self):
-        from hal.models import ServingCell
-
-        return ServingCell("F560E67", 254, "87BB")
-
-    def get_neighbor_cells(self):
-        from hal.models import NeighborCell
-
-        return [NeighborCell(64, -99.0)]
-
-    def get_gnss_fix(self):
-        return None
-
-    def get_lpp_report(self):
-        raise NotImplementedError
-
-    def close(self):
-        pass
+CICLO_LTE = {
+    "AT": ["AT", "OK"],
+    "AT#MONI": "moni_lte.txt",
+    "AT#SERVINFO": "servinfo_lte.txt",
+    "AT#CSURV": "csurv_vivo_campo.txt",
+    "AT$GPSACP": "gpsacp_sem_fix.txt",
+}
 
 
 @pytest.fixture
@@ -309,12 +285,12 @@ def test_C01_foreign_keys_ativas(banco_coletor):
 
 
 @pendente(4)
-def test_C02_tecnologia_gravada_e_a_medida(banco_coletor):
+def test_C02_tecnologia_gravada_e_a_medida(banco_coletor, sem_espera):
     import coletor.daemon as cd
     import coletor.db as cdb
 
     sid = cdb.create_session(banco_coletor, "pedestre", "outdoor")
-    cdb.insert_measurement(banco_coletor, cd.poll_once(_DriverV1("4G"), "fn990", "5G", sid))
+    cdb.insert_measurement(banco_coletor, cd.poll_once(driver_com(CICLO_LTE, sem_espera), "fn990", "5G", sid))
     assert banco_coletor.execute("SELECT technology FROM measurements").fetchone()[0] != "5G"
 
 
@@ -352,7 +328,7 @@ def test_C07_horario_da_sessao_em_utc(banco_coletor):
 
 
 @pendente(4)
-def test_C08_sessao_encerrada_mesmo_com_excecao(monkeypatch):
+def test_C08_sessao_encerrada_mesmo_com_excecao(monkeypatch, sem_espera):
     import coletor.daemon as cd
     import coletor.db as cdb
 
@@ -369,8 +345,12 @@ def test_C08_sessao_encerrada_mesmo_com_excecao(monkeypatch):
         def close(self):
             pass
 
+    def falha():
+        raise TimeoutError("timeout simulado")
+
+    driver = driver_com({"AT": ["AT", "OK"], "AT#MONI": falha}, sem_espera)
     monkeypatch.setattr(cd.db, "connect", lambda caminho: SemFechar(compartilhado))
-    monkeypatch.setattr(cd, "_connect_modems", lambda args: [("fn990", "5G", _DriverV1(falha=TimeoutError("timeout simulado")))])
+    monkeypatch.setattr(cd, "_connect_modems", lambda args: [("fn990", "5G", driver)])
     monkeypatch.setattr(sys, "argv", ["coletor.daemon", "--scenario", "pedestre", "--environment", "outdoor",
                                       "--fn990-port", "PORTA_FALSA", "--db", ":memory:"])
     with pytest.raises(TimeoutError):

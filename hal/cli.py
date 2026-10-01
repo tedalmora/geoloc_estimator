@@ -1,35 +1,35 @@
-"""Utilitário de linha de comando para testar o HAL sozinho, sem precisar do Coletor.
+"""Utilitário de linha de comando para testar o HAL sozinho, sem o Coletor.
 
-Uso (rodar a partir da pasta `codigo/`):
+Cada subcomando executa só o comando AT correspondente e imprime a leitura em JSON (com status,
+chaves das células e resposta crua). Uso (a partir da pasta `codigo/`):
     python -m hal.cli --port /dev/ttyUSB2 alive
     python -m hal.cli --port /dev/ttyUSB2 status
-    python -m hal.cli --port /dev/ttyUSB2 signal
-    python -m hal.cli --port /dev/ttyUSB2 cell
-    python -m hal.cli --port /dev/ttyUSB2 neighbors
-    python -m hal.cli --port /dev/ttyUSB2 gnss
+    python -m hal.cli --port /dev/ttyUSB2 prepare      # liga o GNSS só se estiver desligado
+    python -m hal.cli --port /dev/ttyUSB2 moni         # célula servidora (AT#MONI)
+    python -m hal.cli --port /dev/ttyUSB2 servinfo     # PLMN da servidora (AT#SERVINFO)
+    python -m hal.cli --port /dev/ttyUSB2 csurv        # varredura (AT#CSURV, até 3 min)
+    python -m hal.cli --port /dev/ttyUSB2 gnss         # AT$GPSACP
+    python -m hal.cli --port /dev/ttyUSB2 lpp-config   # sonda experimental, só leitura (AT$LCSLPP?)
     python -m hal.cli --port /dev/ttyUSB2 reboot
 """
 import argparse
-import dataclasses
 import json
 
 from .fn990_driver import FN990Driver
+from .models import to_jsonable
+
+COMMANDS = ("alive", "status", "prepare", "moni", "servinfo", "csurv", "gnss", "lpp-config", "reboot")
 
 
 def _print(obj) -> None:
-    if dataclasses.is_dataclass(obj):
-        obj = dataclasses.asdict(obj)
-    print(json.dumps(obj, indent=2, ensure_ascii=False, default=str))
+    print(json.dumps(to_jsonable(obj), indent=2, ensure_ascii=False, default=str))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="CLI de teste manual do HAL (FN990)")
     parser.add_argument("--port", required=True, help="ex.: /dev/ttyUSB2")
     parser.add_argument("--baudrate", type=int, default=115200)
-    parser.add_argument(
-        "comando",
-        choices=["alive", "status", "signal", "cell", "neighbors", "gnss", "reboot", "lpp"],
-    )
+    parser.add_argument("comando", choices=COMMANDS)
     args = parser.parse_args()
 
     driver = FN990Driver()
@@ -39,21 +39,21 @@ def main() -> None:
             print("Vivo" if driver.is_alive() else "Sem resposta")
         elif args.comando == "status":
             _print(driver.get_status())
-        elif args.comando == "signal":
-            _print(driver.get_signal_metrics())
-        elif args.comando == "cell":
-            _print(driver.get_serving_cell())
-        elif args.comando == "neighbors":
-            _print([dataclasses.asdict(n) for n in driver.get_neighbor_cells()])
+        elif args.comando == "prepare":
+            _print(driver.prepare_for_collection())
+        elif args.comando == "moni":
+            _print(driver.read_serving_cell())
+        elif args.comando == "servinfo":
+            _print(driver.read_serving_info())
+        elif args.comando == "csurv":
+            _print(driver.scan_cells())
         elif args.comando == "gnss":
-            fix = driver.get_gnss_fix()
-            _print(fix if fix else "Sem fix GNSS ainda")
+            _print(driver.read_gnss())
+        elif args.comando == "lpp-config":
+            _print(driver.query_lpp_config())
         elif args.comando == "reboot":
             driver.reboot()
-            print("Comando de reboot enviado -- a porta serial foi fechada localmente.")
-        elif args.comando == "lpp":
-            print("Habilitação:", driver.enable_lpp_positioning())
-            _print(driver.get_lpp_report())
+            print("Comando de reboot enviado; a porta serial foi fechada localmente.")
     finally:
         if args.comando != "reboot":
             driver.close()

@@ -21,11 +21,14 @@ import queue
 import signal
 import threading
 import time
+from types import SimpleNamespace
 from typing import List, Tuple
 
 from hal.fn990_driver import FN990Driver
 from hal.health import HealthMonitor
 from hal.modem_driver import ModemDriver
+from hal.models import RAT_LTE
+from hal.parsing import resolve_serving_cell
 
 from . import db
 
@@ -33,27 +36,38 @@ DEFAULT_INTERVAL_S = 60.0
 
 
 def poll_once(driver: ModemDriver, modem_id: str, technology: str, session_id: int, collect_lpp: bool = False) -> dict:
-    """1 leitura completa de 1 modem -- reaproveitada pelo modo on-demand e pelo loop contínuo.
+    """1 leitura completa de 1 modem, no formato do banco v1 (adaptação provisória; o Coletor
+    é reescrito sobre a aquisição compartilhada na fase 4).
 
-    `collect_lpp`: também tenta ler o relatório LPP (AoA/DL-AoD, ver hal/fn990_driver.py) a cada
-    leitura -- é opcional e experimental (--enable-lpp), então uma falha aqui não deve derrubar
-    a leitura normal (sinal/célula/GNSS), só deixa lpp_raw_log vazio.
+    `collect_lpp`: também guarda o texto cru da sonda experimental somente leitura AT$LCSLPP?.
     """
-    lpp_raw_log = None
-    if collect_lpp:
-        try:
-            lpp_raw_log = driver.get_lpp_report().raw_text
-        except Exception as exc:
-            print(f"[{modem_id}] leitura de LPP falhou (ok, é experimental): {exc}")
+    lpp_raw_log = driver.query_lpp_config().raw_text if collect_lpp else None
+    moni = driver.read_serving_cell()
+    servinfo = driver.read_serving_info()
+    csurv = driver.scan_cells()
+    gnss = driver.read_gnss()
+    serving = resolve_serving_cell(moni, servinfo, csurv.observations)
+    primary = moni.primary
     return {
         "session_id": session_id,
         "timestamp": time.time(),
         "modem_id": modem_id,
         "technology": technology,
-        "signal": driver.get_signal_metrics(),
-        "cell": driver.get_serving_cell(),
-        "neighbors": driver.get_neighbor_cells(),
-        "gnss": driver.get_gnss_fix(),
+        "signal": SimpleNamespace(
+            rsrp_dbm=primary.rsrp_dbm if primary else None,
+            rsrq_db=primary.rsrq_db if primary else None,
+            sinr_db=moni.nr.sinr_db if moni.nr else None,
+            timing_advance=None,
+        ),
+        "cell": SimpleNamespace(cell_id=serving.cell_id, pci=serving.pci, tac=serving.tac),
+        "neighbors": [
+            SimpleNamespace(pci=o.pci, rsrp_dbm=o.rsrp_dbm)
+            for o in csurv.observations
+            if o.rat == RAT_LTE and o.pci is not None and o.rsrp_dbm is not None
+        ],
+        "gnss": None if gnss.fix is None else SimpleNamespace(
+            lat=gnss.fix.lat, lon=gnss.fix.lon, alt_m=gnss.fix.alt_m, fix_quality=str(gnss.fix.fix_type)
+        ),
         "lpp_raw_log": lpp_raw_log,
     }
 
@@ -183,8 +197,8 @@ def main() -> None:
     parser.add_argument("--fn990-port", dest="fn990_port", default=None, help="ex.: /dev/ttyUSB2")
     parser.add_argument("--baudrate", type=int, default=115200)
     parser.add_argument(
-        "--enable-lpp", dest="enable_lpp", action="store_true",
-        help="também tenta habilitar e ler dados de LPP (AoA/DL-AoD) a cada leitura -- experimental",
+        "--lpp-probe", dest="lpp_probe", action="store_true",
+        help="também guarda a resposta crua de AT$LCSLPP? (sonda experimental, só leitura)",
     )
     args = parser.parse_args()
 
@@ -192,12 +206,6 @@ def main() -> None:
         parser.error("--scenario e --environment são obrigatórios nos modos 'ondemand' e 'continuous'.")
 
     modems = _connect_modems(args)
-    if args.enable_lpp:
-        for modem_id, _technology, driver in modems:
-            try:
-                driver.enable_lpp_positioning()
-            except Exception as exc:
-                print(f"[{modem_id}] não foi possível habilitar LPP (ok, é experimental): {exc}")
     try:
         if args.mode == "status":
             run_status(modems)
@@ -209,10 +217,10 @@ def main() -> None:
 
         if args.mode == "continuous":
             print(f"Sessão {session_id} iniciada em modo contínuo (a cada {args.interval:.0f}s). Ctrl+C para parar.")
-            run_continuous(modems, args.db, session_id, args.interval, collect_lpp=args.enable_lpp)
+            run_continuous(modems, args.db, session_id, args.interval, collect_lpp=args.lpp_probe)
         else:
             print(f"Sessão {session_id}: leitura sob demanda.")
-            run_ondemand(modems, args.db, session_id, collect_lpp=args.enable_lpp)
+            run_ondemand(modems, args.db, session_id, collect_lpp=args.lpp_probe)
 
         conn = db.connect(args.db)
         db.close_session(conn, session_id)

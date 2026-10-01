@@ -47,11 +47,11 @@ Fingerprint treinar depois.
 
 | Tabela / coluna | De onde vem (método do HAL) | Serve para |
 |---|---|---|
-| `measurements.rsrp_dbm/rsrq_db/sinr_db` + `neighbor_cells.pci/rsrp_dbm` | `get_signal_metrics()` + `get_neighbor_cells()` | **Fingerprinting** -- o único método que ainda precisa deste histórico para treinar |
-| `measurements.gnss_lat/gnss_lon/...` | `get_gnss_fix()` | *ground truth* -- treina o Fingerprint **e** valida/faz *backtesting* dos métodos determinísticos (`estimador.compare`) contra pontos reais |
-| `measurements.serving_cell_id/serving_pci/serving_tac` | `get_serving_cell()` | não é mais necessário para treinar nada (Cell-ID agora é lookup no cadastro) -- mantido só para permitir comparar/validar o cadastro (`estimador.compare`) contra o histórico |
-| `measurements.timing_advance` | `get_signal_metrics()` | idem -- não treina mais nada, serve só para validar a fórmula determinística do TA contra pontos reais |
-| `measurements.lpp_raw_log` | `enable_lpp_positioning()` + `get_lpp_report()`, só se `--enable-lpp` | insumo cru para o método **aoa**, ainda precisa de parsing manual do ângulo |
+| `measurements.rsrp_dbm/rsrq_db/sinr_db` + `neighbor_cells.pci/rsrp_dbm` | `read_serving_cell()` + `scan_cells()` | **Fingerprinting** -- o único método que ainda precisa deste histórico para treinar |
+| `measurements.gnss_lat/gnss_lon/...` | `read_gnss()` | posição de referência auxiliar (GNSS do modem) |
+| `measurements.serving_cell_id/serving_pci/serving_tac` | `read_serving_cell()` + `read_serving_info()` + `scan_cells()` (cruzamento em `hal.parsing.resolve_serving_cell`) | comparar/validar o cadastro (`estimador.compare`) contra o histórico |
+| `measurements.timing_advance` | — (sempre vazio: TA não é lido) | idem |
+| `measurements.lpp_raw_log` | `query_lpp_config()`, só com `--lpp-probe` | texto cru da sonda experimental somente leitura `AT$LCSLPP?` |
 | `health_checks.alive` | `is_alive()` (via `hal.health.HealthMonitor`) | confiabilidade/robustez -- não é geolocalização, é operação |
 
 ## Os 3 modos (sem mudanças)
@@ -69,8 +69,8 @@ python -m coletor.daemon --mode continuous --interval 60 \
     --scenario pedestre --environment outdoor \
     --fn990-port /dev/ttyUSB2 --db radiomapa.db
 
-# qualquer modo acima aceita --enable-lpp para também tentar captar AoA/DL-AoD
-python -m coletor.daemon --mode continuous --enable-lpp \
+# qualquer modo acima aceita --lpp-probe (sonda experimental somente leitura de AT$LCSLPP?)
+python -m coletor.daemon --mode continuous --lpp-probe \
     --scenario pedestre --environment outdoor \
     --fn990-port /dev/ttyUSB2 --db radiomapa.db
 ```

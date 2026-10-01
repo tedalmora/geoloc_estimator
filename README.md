@@ -122,19 +122,19 @@ para a explicação completa (o que cada método faz/não faz e para qual geoloc
 ```bash
 python -m hal.cli --port /dev/ttyUSB2 alive       # "Vivo" ou "Sem resposta"
 python -m hal.cli --port /dev/ttyUSB2 status      # fabricante, modelo, firmware, IMEI, SIM, uptime, temperatura...
-python -m hal.cli --port /dev/ttyUSB2 signal      # RSRP/RSRQ (SINR/Timing Advance não disponíveis neste firmware)
-python -m hal.cli --port /dev/ttyUSB2 cell        # célula servidora (Cell-ID, PCI, TAC)
-python -m hal.cli --port /dev/ttyUSB2 neighbors   # células vizinhas (fingerprinting)
-python -m hal.cli --port /dev/ttyUSB2 gnss        # posição GNSS atual (ou "Sem fix GNSS ainda")
+python -m hal.cli --port /dev/ttyUSB2 prepare     # liga o GNSS só se AT$GPSP? disser que está desligado
+python -m hal.cli --port /dev/ttyUSB2 moni        # célula servidora LTE/NR e modo de acesso (AT#MONI)
+python -m hal.cli --port /dev/ttyUSB2 servinfo    # PLMN da servidora (AT#SERVINFO)
+python -m hal.cli --port /dev/ttyUSB2 csurv       # varredura de células com radio_key/global_cell_key (AT#CSURV, até 3 min)
+python -m hal.cli --port /dev/ttyUSB2 gnss        # AT$GPSACP: fix 2D/3D, HDOP, satélites, UTC
+python -m hal.cli --port /dev/ttyUSB2 lpp-config  # sonda experimental somente leitura (AT$LCSLPP?)
 python -m hal.cli --port /dev/ttyUSB2 reboot      # reinicia o módulo (AT#REBOOT)
-python -m hal.cli --port /dev/ttyUSB2 lpp         # habilita LPP e tenta ler o relatório (AoA/DL-AoD, experimental)
 ```
 
-Todo o parsing de `signal`/`cell`/`neighbors`/`lpp` foi escrito com base na documentação pública
-da Telit — **o formato exato só se confirma testando com SIM + rede real**. Se a saída vier
-vazia ou incoerente, abra `hal/fn990_driver.py`, cole a resposta bruta recebida (adicione um
-`print(raw)` temporário) e ajuste as expressões regulares — é o mesmo processo já usado para
-confirmar os comandos existentes via `AT+CLAC` (ver `planejamento/guia_comandos_modem.md`).
+Cada comando imprime a leitura em JSON com `status` e a resposta crua. Os formatos foram
+conferidos no manual do FN990 (Rev.5) e em fragmentos de campo, e os parsers têm testes com
+fixtures rotuladas (`tests/fixtures/at/`). Uma resposta fora do formato esperado vira
+`status: malformed`, sem exceção; nesse caso, guarde a resposta crua e acrescente uma fixture.
 
 ---
 
@@ -158,9 +158,9 @@ python -m coletor.daemon --mode continuous --interval 60 \
     --scenario pedestre --environment outdoor \
     --fn990-port /dev/ttyUSB2 --db radiomapa.db
 
-# Qualquer um dos 3 modos acima aceita --enable-lpp para também tentar ler dados de AoA/DL-AoD
-# (opt-in porque é experimental e mais lento -- o texto bruto fica salvo em lpp_raw_log)
-python -m coletor.daemon --mode continuous --enable-lpp \
+# Qualquer um dos modos acima aceita --lpp-probe para também guardar a resposta crua de
+# AT$LCSLPP? (sonda experimental, só leitura; nada é gravado no modem) em lpp_raw_log
+python -m coletor.daemon --mode continuous --lpp-probe \
     --scenario pedestre --environment outdoor \
     --fn990-port /dev/ttyUSB2 --db radiomapa.db
 ```

@@ -29,6 +29,17 @@ def at_lines(name):
     return read_fixture(name)[1]
 
 
+def driver_com(respostas, relogio=None):
+    """FN990Driver ligado a uma porta roteirizada. Cada valor de `respostas` pode ser o nome de
+    uma fixture, uma lista de linhas ou uma função que devolve a lista."""
+    from hal.fn990_driver import FN990Driver
+
+    roteiro = {cmd: at_lines(v) if isinstance(v, str) else v for cmd, v in respostas.items()}
+    driver = FN990Driver()
+    driver._ser = ScriptedSerial(roteiro, clock=relogio)
+    return driver
+
+
 class ScriptedSerial:
     """pyserial falso: cada comando escrito enfileira as linhas roteirizadas, terminadas em CRLF.
 
@@ -36,16 +47,20 @@ class ScriptedSerial:
     argumentos que devolve a lista (útil para respostas que mudam a cada chamada). Comando
     desconhecido recebe eco + ERROR, como o modem faz com comando não suportado.
     `pending` simula bytes que já estavam no buffer antes do primeiro comando (URCs, sobras).
+    `clock` (relógio virtual dos testes): leitura sem dado avança o relógio pelo timeout da porta,
+    como uma porta real bloquearia.
     """
 
-    def __init__(self, responses=None, pending=None, timeout=5.0):
+    def __init__(self, responses=None, pending=None, timeout=5.0, clock=None):
         self.responses = {k.upper(): v for k, v in (responses or {}).items()}
         self.buffer = bytearray()
         if pending:
             self.buffer.extend("".join(line + "\r\n" for line in pending).encode())
         self.timeout = timeout
+        self.clock = clock
         self.is_open = True
         self.written = []
+        self.raw_written = []
 
     @property
     def in_waiting(self):
@@ -55,6 +70,7 @@ class ScriptedSerial:
         self.buffer.clear()
 
     def write(self, data):
+        self.raw_written.append(bytes(data))
         command = data.decode("ascii", "ignore").strip()
         self.written.append(command)
         lines = self.responses.get(command.upper())
@@ -65,7 +81,14 @@ class ScriptedSerial:
         self.buffer.extend("".join(line + "\r\n" for line in lines).encode())
         return len(data)
 
+    def _idle(self):
+        if self.clock is not None:
+            self.clock.sleep(self.timeout or 0)
+        return b""
+
     def readline(self):
+        if not self.buffer:
+            return self._idle()
         idx = self.buffer.find(b"\n")
         end = len(self.buffer) if idx < 0 else idx + 1
         data = bytes(self.buffer[:end])
@@ -73,6 +96,8 @@ class ScriptedSerial:
         return data
 
     def read(self, size=1):
+        if not self.buffer:
+            return self._idle()
         data = bytes(self.buffer[:size])
         del self.buffer[:size]
         return data
@@ -85,10 +110,11 @@ class ScriptedSerial:
 
 
 class BlockingSerial:
-    """Emula o pyserial quando nada chega: read/readline bloqueiam pelo timeout configurado."""
+    """Emula o pyserial quando nada chega: read/readline bloqueiam (de verdade) pelo timeout."""
 
-    def __init__(self, *args, timeout=5.0, **kwargs):
+    def __init__(self, *args, timeout=5.0, clock=None, **kwargs):
         self.timeout = timeout
+        self.clock = clock
         self.is_open = True
         self.written = []
 
@@ -119,7 +145,9 @@ class BlockingSerial:
 
 
 class SilentSerial(BlockingSerial):
-    """Porta aberta que nunca responde e não bloqueia (para testar desistência por prazo)."""
+    """Porta aberta que nunca responde; com `clock`, cada leitura avança o relógio virtual."""
 
     def _block(self):
+        if self.clock is not None:
+            self.clock.sleep(self.timeout or 0)
         return b""

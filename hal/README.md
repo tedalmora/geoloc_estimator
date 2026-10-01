@@ -1,85 +1,86 @@
 # HAL — Camada de Abstração de Hardware
 
-Biblioteca **on-demand** para falar com o modem: você chama um método, ele manda um comando
-AT, espera a resposta, e devolve. Sem *loop*, sem estado de "sessão", sem banco de dados —
-**não é um daemon**. Quem fica rodando continuamente são o [Coletor](../coletor/README.md)
-(campanha de campo) e o `estimador/live.py` (posição ao vivo, ver
-[`estimador/README.md`](../estimador/README.md)) -- os dois importam e chamam esta
-biblioteca, cada um com sua própria conexão. Ver `planejamento/arquitetura_hal.md` para a
-justificativa completa dessa separação.
+Biblioteca sob demanda para falar com o modem. Cada método de leitura envia **um** comando AT,
+espera o código final dentro de um prazo e devolve uma leitura tipada com `status` (`ok`,
+`empty`, `error`, `timeout`, `malformed`, `unsupported`; no GNSS também `no_fix` e `off`).
+Não há laço, sessão nem banco de dados. Quem chama o HAL é a aquisição compartilhada
+(Coletor e medição ao vivo).
+
+> Documento de trabalho da Etapa 2 (fase 2). A documentação final será revisada em fase posterior.
 
 ```
 hal/
-    models.py         # estruturas de dados que os métodos abaixo devolvem
-    modem_driver.py   # o contrato (interface) que todo driver de modem segue
-    fn990_driver.py   # implementação real para o Telit Cinterion FN990
-    parsing.py        # funções auxiliares de regex/conversão, compartilhadas
-    health.py         # monitor de saúde da conexão (usado pelo Coletor e por estimador/live.py)
-    cli.py            # utilitário de linha de comando para testar sozinho
+    models.py         # observações de célula, chaves de identidade, leituras, AtResponse
+    parsing.py        # parsers puros (#MONI, #SERVINFO, #CSURV, $GPSACP, $GPSP?, $LCSLPP?) e cruzamento da servidora
+    modem_driver.py   # contrato comum dos drivers
+    fn990_driver.py   # transporte AT e comandos do Telit Cinterion FN990
+    health.py         # contagem de falhas seguidas para decidir reconexão
+    cli.py            # teste manual, sem o Coletor
 ```
 
-## O que ele faz / não faz
+## Identidade de célula
 
-**Faz:** abre/fecha a porta serial, envia comandos AT, faz o parsing da resposta em
-estruturas de dados Python, expõe métodos padronizados independente do modem por baixo.
+- `radio_key = RAT:ARFCN:PCI` (ex.: `LTE:3375:254`): identidade de rádio, usada nas observações,
+  no snapshot, no banco multicélula e nas features do fingerprint.
+- `global_cell_key = RAT:PLMN:CELL_ID` (ex.: `LTE:72406:F560E67`): identidade lógica (ECGI/NCGI),
+  usada no cadastro de células e no Cell-ID.
 
-**Não faz:** não roda continuamente, não grava em banco de dados, não calcula posição —
-isso é responsabilidade do Coletor e do Estimador, respectivamente.
+Cada chave só existe quando todos os componentes vieram no mesmo registro do modem; não há
+chave parcial nem substituição de campos. A RAT é a da célula (`LTE`/`NR`). O modo de acesso
+da leitura (`LTE`, `NR_NSA`, `NR_SA`, `UNKNOWN`) é guardado à parte. Cell-ID e TAC ficam em
+hexadecimal maiúsculo; o `#CSURV` os informa em decimal e o parser converte.
 
-## Tabela: cada método e para qual geolocalização ele serve
+## Métodos
 
-| Método | Comando AT usado | Serve para | Precisa de rede/SIM? |
+| Método | Comando AT | Devolve | Observação |
 |---|---|---|---|
-| `connect()` / `close()` | — | gerenciar a conexão serial | Não |
-| `send_at()` | qualquer, cru | depuração manual | Não |
-| `is_alive()` / `reconnect()` | `AT` | health check (usado pelo Coletor) | Não |
-| `get_status()` | `ATI`, `+CGMI/CGMM/CGMR/CGSN`, `+CPIN?`, `+CSQ`, `+COPS?`, `#UPTIME`, `#TEMPSENS` | diagnóstico/manutenção — não é geolocalização em si | Parcial |
-| `reboot()` | `AT#REBOOT` | manutenção | Não |
-| `get_serving_cell()` | `AT#MONI` (+ `AT#CSURV` para achar o PCI) | **Cell-ID / E-CID** | Sim, p/ valor útil |
-| `get_signal_metrics()` | `AT#MONI` | RSRP/RSRQ — alimenta o **Fingerprint**. SINR e Timing Advance ficam sempre `None` neste firmware (ver nota abaixo) | Sim, p/ valor útil |
-| `get_neighbor_cells()` | `AT#CSURV` | **Fingerprinting** (células vizinhas) | Sim, p/ valor útil |
-| `get_gnss_fix()` | `AT$GPSACP` | *ground truth* (posição real, usada para treinar/avaliar TODOS os métodos) | Não (independente da operadora) |
-| `enable_lpp_positioning()` | `AT$LCSLPP=1` | habilita a sessão para **DL-AoD/UL-AoA** | Sim |
-| `get_lpp_report()` | `AT$LCSLPP?` | tenta ler o relatório da sessão LPP acima — insumo do método `aoa` do Estimador | Sim |
+| `connect()` | `AT` | — | descarta sobras da porta e exige `OK`; senão `ConnectionError` |
+| `send_at(cmd, timeout, drain_after)` | qualquer | `AtResponse` | prazo total; terminador `<CR>` |
+| `is_alive()` / `reconnect()` | `AT` | `bool` / — | health check |
+| `get_status()` | `+CGMI`, `+CGMM`, `+CGMR`, `+CGSN`, `+CPIN?`, `+CSQ`, `+COPS?`, `#UPTIME`, `#TEMPSENS` | `ModemStatus` | texto cru de cada comando |
+| `prepare_for_collection()` | `$GPSP?` e, só se desligado, `$GPSP=1` | `PrepareResult` | `$GPSP=1` apaga a memória do GNSS (manual p. 763) |
+| `read_serving_cell()` | `#MONI` | `MoniReading` | servidora LTE e/ou NR; NR_NSA só com `NR_STATE` = 2 |
+| `read_serving_info()` | `#SERVINFO` | `ServInfoReading` | traz o PLMN da servidora |
+| `scan_cells()` | `#CSURV` | `CsurvReading` | até 3 min; todas as células LTE/NR, inclusive de outras operadoras e `CELL_FORBIDDEN` |
+| `read_gnss()` | `$GPSACP` | `GnssReading` | fix 2D/3D com HDOP, satélites e UTC; fix 0/1 = sem posição |
+| `query_lpp_config()` | `$LCSLPP?` | `LppConfigProbe` | sonda experimental, só leitura: texto cru e status |
+| `reboot()` | `#REBOOT` | — | fecha a porta local |
 
-## Resposta direta: "dá pra fazer todos os tipos de medida, até AoA?"
+O `#MONI` e o `#SERVINFO` não informam o PCI da servidora LTE. `parsing.resolve_serving_cell()`
+(função pura) cruza o Cell-ID da servidora com os registros completos do `#CSURV`. Se houver
+exatamente um registro compatível, as duas chaves vêm desse registro. Caso contrário,
+`radio_key` fica vazia; o PCI não é adivinhado.
 
-**Cell-ID, Timing Advance, Fingerprinting e GNSS: sim**, os métodos já existem e já fazem o
-parsing (o formato exato de cada resposta ainda precisa ser calibrado com SIM + rede real,
-mas a estrutura toda já está pronta e funcional).
+## O que o HAL não faz
 
-**AoA/DL-AoD: parcialmente.** `enable_lpp_positioning()`/`get_lpp_report()` já existem e já
-tentam habilitar a sessão e ler uma resposta — mas **quem mede o ângulo é a rede** (via LPP),
-não o HAL. Sem SIM + acesso ao core, esse método não tem como ser validado: o HAL pode pedir o
-relatório, mas o conteúdo real dele (onde exatamente está o ângulo dentro do texto) só se
-descobre testando em campo — exatamente como já aconteceu com os outros comandos confirmados
-via `AT+CLAC` (ver `planejamento/guia_comandos_modem.md`). Quando isso acontecer, ajuste as
-regex em `get_lpp_report()` (dentro de `fn990_driver.py`) com o texto real recebido.
+- Não grava configuração persistente. Não há escrita de `AT$LCSLPP` (o manual indica
+  "Setting saved: Auto"), e o `#MONI` não é reconfigurado: o formato de célula adjacente vira
+  `malformed`.
+- Não mede ângulo nem RSTD: o manual não documenta comando AT que devolva DL-AoD, UL-AoA ou RSTD.
+- Não lê nem converte Timing Advance. O `#TAINFO` não existe no firmware de campo e o manual
+  não documenta a unidade.
+- Não calcula posição e não grava banco.
 
-## Como testar sozinho (sem o Coletor)
+## Teste manual
 
 ```bash
 python -m hal.cli --port /dev/ttyUSB2 alive
 python -m hal.cli --port /dev/ttyUSB2 status
-python -m hal.cli --port /dev/ttyUSB2 signal
-python -m hal.cli --port /dev/ttyUSB2 cell
-python -m hal.cli --port /dev/ttyUSB2 neighbors
+python -m hal.cli --port /dev/ttyUSB2 prepare
+python -m hal.cli --port /dev/ttyUSB2 moni
+python -m hal.cli --port /dev/ttyUSB2 servinfo
+python -m hal.cli --port /dev/ttyUSB2 csurv
 python -m hal.cli --port /dev/ttyUSB2 gnss
-python -m hal.cli --port /dev/ttyUSB2 lpp
+python -m hal.cli --port /dev/ttyUSB2 lpp-config
 python -m hal.cli --port /dev/ttyUSB2 reboot
 ```
 
-## Como ele conversa com o Coletor e com o Estimador
+## Testes automatizados
 
-O Coletor faz `from hal.fn990_driver import FN990Driver`, instancia um driver por modem, e
-chama os métodos acima em um laço com intervalo configurável — o HAL nunca sabe que isso está
-acontecendo, ele só responde uma chamada de cada vez. `estimador/live.py` faz exatamente a
-mesma coisa, de forma independente (não pelo Coletor) — ver
-[`coletor/README.md`](../coletor/README.md) e [`estimador/README.md`](../estimador/README.md)
-para a diferença entre os dois usos (campanha de campo vs. medição ao vivo).
+A partir de `codigo/`, com `requirements-dev.txt` instalado: `python -m pytest tests/test_hal.py`.
+As respostas usadas estão em `tests/fixtures/at/`, cada uma com origem declarada no cabeçalho.
 
-## Quando os outros modems chegarem (EM7565, EM120R-GL)
+## Outros modems (EM7565, EM120R-GL)
 
-Crie `EM7565Driver(ModemDriver)`/`EM120RGLDriver(ModemDriver)` em novos arquivos, implementando
-o mesmo contrato de `modem_driver.py` (descobrindo o dialeto AT de cada um via `AT+CLAC`,
-mesmo processo já usado para o FN990). O Coletor e o Estimador **não precisam mudar nada**.
+Um driver novo implementa o contrato de `modem_driver.py`, com o dialeto AT de cada modem
+levantado via `AT+CLAC`. Para isso, ele deve devolver as mesmas leituras de `models.py`.

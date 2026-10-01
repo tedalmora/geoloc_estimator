@@ -1,20 +1,43 @@
 """Driver de modem para o Telit Cinterion FN990.
 
-Os comandos usados aqui são reais -- confirmados a partir do AT+CLAC rodado no modem físico
-(ver planejamento/comandosModem.txt e planejamento/guia_comandos_modem.md). O FORMATO das
-respostas de rede (#MONI, #CSURV, #SERVINFO, +CESQ, $GPSACP com fix) já foi validado em campo
-com SIM real (Vivo, LTE) -- ver docstrings de cada método para o que cada campo significa e o
-que ainda não foi confirmado (SINR, Timing Advance).
+Comandos conferidos no AT+CLAC do modem (planejamento/comandosModem.txt) e no manual
+80691ST11097A Rev.5 (2025-10-20). Os formatos de resposta e as decisões de parsing estão em
+hal/parsing.py; aqui ficam só o transporte AT e a ordem dos comandos.
+
+Regras de segurança do driver:
+- nenhum comando grava configuração persistente. Em particular, não há escrita de AT$LCSLPP
+  ("Setting saved: Auto", manual p. 740): o LPP é só consultado (AT$LCSLPP?);
+- AT$GPSP=1 só é enviado se AT$GPSP? disser que o GNSS está desligado, porque ele também
+  apaga a memória do GNSS (manual p. 763);
+- o #MONI não é reconfigurado: se ficou em modo de célula adjacente, a leitura vem 'malformed'.
 """
-import re
 import time
 from typing import List, Optional
 
 import serial  # pyserial
 
 from .modem_driver import ModemDriver
-from .models import GnssFix, LppReport, ModemStatus, NeighborCell, ServingCell, SignalMetrics
-from .parsing import extract_float, extract_str, nmea_to_decimal, strip_echo
+from .models import (
+    AtResponse,
+    CsurvReading,
+    GnssReading,
+    LppConfigProbe,
+    ModemStatus,
+    MoniReading,
+    PrepareResult,
+    ServInfoReading,
+)
+from .parsing import parse_csurv, parse_gpsacp, parse_gpsp, parse_lpp_config, parse_moni, parse_servinfo
+
+READ_SLICE_S = 0.2  # leitura em fatias curtas: o prazo total vale mesmo com a porta muda
+POLL_S = 0.05
+HANDSHAKE_ATTEMPTS = 3
+HANDSHAKE_SETTLE_S = 1.0
+DEFAULT_TIMEOUT_S = 5.0
+CSURV_TIMEOUT_S = 180.0  # manual p. 818: "executed within max. 3 minute"
+CSURV_DRAIN_S = 1.0  # campo: o #CSURV continua emitindo bytes logo depois do OK
+CSURV_MIN_INTERVAL_S = 2.0  # campo: um #CSURV logo depois de outro devolve varredura vazia
+GPSP_ON_TIMEOUT_S = 10.0
 
 
 class FN990Driver(ModemDriver):
@@ -22,224 +45,165 @@ class FN990Driver(ModemDriver):
         self._ser: Optional[serial.Serial] = None
         self._port: Optional[str] = None
         self._baudrate: int = 115200
-        self._timeout: float = 5.0
-        self._csurv_cache: Optional[List[str]] = None
-        self._csurv_cache_time: float = 0.0
-        self._csurv_last_issue_time: float = 0.0
+        self._timeout: float = DEFAULT_TIMEOUT_S
+        self._last_csurv_end: Optional[float] = None
 
     # ------------------------------------------------------------------ conexão
-    def connect(self, port: str, baudrate: int = 115200, timeout: float = 5.0) -> None:
+    def connect(self, port: str, baudrate: int = 115200, timeout: float = DEFAULT_TIMEOUT_S) -> None:
+        """Abre a porta e só retorna quando 'AT' recebe OK; senão levanta ConnectionError.
+
+        Antes de cada tentativa descarta o que chegar por HANDSHAKE_SETTLE_S: em campo, bytes
+        atrasados de um #CSURV de uma conexão anterior corromperam o primeiro comando.
+        """
         self._port, self._baudrate, self._timeout = port, baudrate, timeout
-        self._ser = serial.Serial(port, baudrate=baudrate, timeout=timeout)
-        # Descarta qualquer sobra de uma sessão anterior -- se a porta foi fechada enquanto um
-        # #CSURV ainda estava fisicamente em andamento no modem (varredura ativa, não é
-        # instantânea), os bytes atrasados chegam só agora, na conexão NOVA, e corrompem o
-        # primeiro comando que mandarmos (chegou a substituir a resposta inteira do #MONI por
-        # texto do #CSURV numa sessão de teste real). Um flush só não bastou -- repete 2x com
-        # pausa, pra pegar bytes que ainda estavam a caminho no primeiro flush.
-        for _ in range(2):
-            time.sleep(1.0)
-            self._ser.reset_input_buffer()
-        # Mesmo com o flush acima, confirmado em campo que o 1º comando de uma conexão nova
-        # ainda pode vir corrompido/vazio (mesma causa: bytes atrasados de uma varredura
-        # anterior). Em vez de só esperar e torcer, confirma ativamente: manda "AT" e só
-        # considera a conexão pronta quando a resposta vier limpa (só "OK", nada mais
-        # grudado). Se não vier limpa, flusha e tenta de novo, até um limite -- depois disso
-        # segue em frente mesmo assim (não trava o connect() para sempre).
-        for _ in range(3):
-            resposta = self.send_at("AT", timeout=2.0).strip()
-            if resposta == "OK":
-                break
-            time.sleep(0.5)
-            self._ser.reset_input_buffer()
+        try:
+            self._ser = serial.Serial(port, baudrate=baudrate, timeout=READ_SLICE_S)
+        except serial.SerialException as exc:
+            raise ConnectionError(f"{port}: não foi possível abrir a porta ({exc})") from exc
+        last: Optional[AtResponse] = None
+        for _ in range(HANDSHAKE_ATTEMPTS):
+            self._discard_pending(HANDSHAKE_SETTLE_S)
+            last = self.send_at("AT", timeout=2.0)
+            if last.ok:
+                return
+        self.close()
+        final = last.final if last is not None and last.final else "nenhuma resposta"
+        raise ConnectionError(f"{port}: o modem não respondeu OK a 'AT' em {HANDSHAKE_ATTEMPTS} tentativas ({final})")
 
     def close(self) -> None:
-        if self._ser and self._ser.is_open:
+        if self._ser is not None and self._ser.is_open:
             self._ser.close()
 
-    # ------------------------------------------------------------------ AT cru
-    def send_at(self, command: str, timeout: float = 5.0) -> str:
-        """Envia 1 comando AT e devolve tudo que o modem respondeu, como texto puro.
+    # ------------------------------------------------------------------ transporte AT
+    def send_at(self, command: str, timeout: Optional[float] = None, drain_after: float = 0.0) -> AtResponse:
+        """Envia 1 comando (terminado em <CR>, manual §3) e lê até o código final ou o prazo.
 
-        Lê linha a linha (em vez de 1 leitura só) porque vários comandos AT devolvem
-        múltiplas linhas antes do 'OK' final (ex.: AT#CSURV lista várias células).
+        O prazo é total: a porta é lida em fatias de READ_SLICE_S, então uma porta muda não
+        segura a chamada além de timeout + READ_SLICE_S. Bytes pendentes antes do envio são
+        descartados e contados; `drain_after` > 0 descarta o que chegar depois do código final
+        (usado no #CSURV). O timeout original da porta é restaurado no fim.
         """
+        ser = self._require_port()
+        timeout = self._timeout if timeout is None else timeout
+        pending = ser.in_waiting
+        ser.reset_input_buffer()
+        original_timeout = ser.timeout
+        ser.timeout = READ_SLICE_S
+        lines: List[str] = []
+        final: Optional[str] = None
+        partial = b""
+        start = time.monotonic()
+        deadline = start + timeout
+        try:
+            ser.write((command + "\r").encode("ascii"))
+            while final is None and time.monotonic() < deadline:
+                chunk = ser.readline()
+                if not chunk:
+                    continue
+                partial += chunk
+                if not partial.endswith(b"\n"):
+                    continue
+                line = partial.decode("utf-8", errors="replace").strip()
+                partial = b""
+                if line:
+                    lines.append(line)
+                    if AtResponse.is_final(line):
+                        final = line
+            if partial.strip():
+                lines.append(partial.decode("utf-8", errors="replace").strip())
+            elapsed = time.monotonic() - start
+            drained = self._discard_pending(drain_after) if drain_after > 0 else 0
+        finally:
+            ser.timeout = original_timeout
+        return AtResponse(command, lines, final, elapsed, pending, drained)
+
+    def _discard_pending(self, duration: float) -> int:
+        """Lê e descarta tudo que chegar durante `duration` segundos; devolve quantos bytes."""
+        ser = self._require_port()
+        end = time.monotonic() + duration
+        total = 0
+        while time.monotonic() < end:
+            waiting = ser.in_waiting
+            if waiting:
+                total += len(ser.read(waiting))
+            else:
+                time.sleep(POLL_S)
+        return total
+
+    def _require_port(self):
         if self._ser is None:
             raise RuntimeError("Chame connect() antes de enviar comandos AT.")
-        self._ser.reset_input_buffer()
-        self._ser.write((command + "\r\n").encode("ascii"))
-
-        deadline = time.time() + timeout
-        lines: List[str] = []
-        while time.time() < deadline:
-            raw_line = self._ser.readline()  # respeita o timeout já configurado no Serial
-            if not raw_line:
-                continue
-            line = raw_line.decode(errors="ignore").strip()
-            if not line:
-                continue
-            lines.append(line)
-            if line in ("OK", "ERROR") or line.startswith("+CME ERROR"):
-                break
-        # Comandos lentos (ex.: #CSURV, uma varredura de rede ativa) confirmados em campo
-        # continuando a emitir bytes um instante depois do "OK" -- sem descartar isso agora,
-        # esses bytes vazam pro início da resposta do PRÓXIMO comando AT e corrompem o parsing
-        # dele (foi assim que um #MONI saiu vazio logo depois de um #CSURV mal espaçado).
-        time.sleep(0.3)
-        self._ser.reset_input_buffer()
-        return "\n".join(lines)
+        return self._ser
 
     def is_alive(self) -> bool:
-        """Teste de vida mais barato possível -- usado pelo health check do Coletor."""
         try:
-            return "OK" in self.send_at("AT", timeout=2.0)
-        except Exception:
+            return self.send_at("AT", timeout=2.0).ok
+        except (serial.SerialException, OSError, RuntimeError):
             return False
 
     # ------------------------------------------------------------------ status
     def get_status(self) -> ModemStatus:
+        def text(command: str) -> Optional[str]:
+            resp = self.send_at(command)
+            return resp.text if resp.ok else (resp.final or "sem resposta")
+
         return ModemStatus(
-            manufacturer=strip_echo(self.send_at("AT+CGMI")),
-            model=strip_echo(self.send_at("AT+CGMM")),
-            firmware=strip_echo(self.send_at("AT+CGMR")),
-            imei=strip_echo(self.send_at("AT+CGSN")),
-            sim_status=strip_echo(self.send_at("AT+CPIN?")),
-            signal_quality_raw=strip_echo(self.send_at("AT+CSQ")),
-            operator=strip_echo(self.send_at("AT+COPS?")),
-            uptime_raw=strip_echo(self.send_at("AT#UPTIME")),
-            temperature_raw=strip_echo(self.send_at("AT#TEMPSENS")),
+            manufacturer=text("AT+CGMI"),
+            model=text("AT+CGMM"),
+            firmware=text("AT+CGMR"),
+            imei=text("AT+CGSN"),
+            sim_status=text("AT+CPIN?"),
+            signal_quality_raw=text("AT+CSQ"),
+            operator=text("AT+COPS?"),
+            uptime_raw=text("AT#UPTIME"),
+            temperature_raw=text("AT#TEMPSENS"),
             alive=self.is_alive(),
         )
 
     def reboot(self) -> None:
-        """AT#REBOOT reinicia o módulo por completo -- a porta serial cai junto, por isso
-        fechamos a conexão local em seguida (reconectar depois é responsabilidade de quem chamou)."""
+        """AT#REBOOT derruba a porta serial junto; reconectar fica com quem chamou."""
         self.send_at("AT#REBOOT", timeout=2.0)
         self.close()
 
-    # ------------------------------------------------------------------ sinal / célula
-    def get_signal_metrics(self) -> SignalMetrics:
-        """RSRP/RSRQ vêm do #MONI -- formato real confirmado em campo (Vivo, LTE), 2x, e
-        cruzado com AT+CESQ (rsrq=(16/2)-19,5=-11,5dB, rsrp=34-140=-106dBm -- muito próximo
-        do #MONI na mesma janela de tempo, confirma a leitura). SINR e Timing Advance **não**
-        aparecem em nenhum dos comandos testados até agora (#MONI, #RFSTS, #SERVINFO, +CESQ)
-        -- não é mais só "ainda não achamos", parece não estar exposto via AT simples neste
-        firmware. Ficam None; só reconsiderar se aparecer um comando/campo novo confirmado."""
-        raw = self.send_at("AT#MONI")
-        rsrp = extract_float(raw, r"RSRP:\s*(-?\d+\.?\d*)")
-        rsrq = extract_float(raw, r"RSRQ:\s*(-?\d+\.?\d*)")
-        sinr = None  # não exposto via AT simples neste firmware -- ver docstring
-        ta = None    # não exposto via AT simples neste firmware -- ver docstring
-        technology = "5G" if "NR" in raw.upper() else "4G"
-        return SignalMetrics(technology, rsrp, rsrq, sinr, ta)
+    def prepare_for_collection(self) -> PrepareResult:
+        """Liga o GNSS só se AT$GPSP? disser que está desligado (AT$GPSP=1 apaga a memória do GNSS)."""
+        query = self.send_at("AT$GPSP?")
+        before = parse_gpsp(query)
+        responses = [query]
+        power_on: Optional[AtResponse] = None
+        if before == 0:
+            power_on = self.send_at("AT$GPSP=1", timeout=GPSP_ON_TIMEOUT_S)
+            responses.append(power_on)
+        return PrepareResult(
+            gnss_power_before=before,
+            gnss_power_on_sent=power_on is not None,
+            gnss_power_on_final=power_on.final if power_on is not None else None,
+            responses=responses,
+        )
 
-    def get_serving_cell(self) -> ServingCell:
-        """`Id:`/`TAC:` do #MONI dão cell_id/tac direto. PCI (Physical Cell ID) **não** aparece
-        no #MONI nem no #SERVINFO (`#SERVINFO: 3375,-76,"VIVO","72406",F560E67,87BB,640,3,-107`
-        -- conferido campo a campo, nenhum bate com o PCI real) -- só existe cruzando o
-        #CSURV (que lista `phyCellId` por célula) com o cell_id da própria #MONI. Confirmado
-        2x em campo: a mesma célula (cellId F560E67/tac 87BB/earfcn 3375) sempre aparece com
-        phyCellId 254 no #CSURV. Isso custa 1 varredura completa (`_get_csurv_records`, com
-        cache curto -- ver abaixo) só na primeira vez do ciclo de poll."""
-        raw = self.send_at("AT#MONI")
-        # (?<![A-Za-z]) -- "Id:" sozinho, não o final de "cellId:" (que aparece no #CSURV;
-        # se sobras de um #CSURV vazarem pro #MONI, sem isso o regex pegava o cellId errado).
-        cell_id = extract_str(raw, r"(?<![A-Za-z])Id:\s*([0-9A-Fa-f]+)")
-        tac = extract_str(raw, r"(?<![A-Za-z])TAC:\s*([0-9A-Fa-f]+)")
-        pci = self._find_pci_via_csurv(cell_id) if cell_id else None
-        return ServingCell(cell_id, pci, tac)
+    # ------------------------------------------------------------------ leituras
+    def read_serving_cell(self) -> MoniReading:
+        return parse_moni(self.send_at("AT#MONI"))
 
-    def _get_csurv_records(self, max_age_s: float = 3.0) -> List[str]:
-        """Cacheia o #CSURV por alguns segundos -- `get_serving_cell()` (via cross-match de
-        PCI) e `get_neighbor_cells()` são chamados em sequência no mesmo ciclo de poll
-        (`coletor/daemon.py: poll_once`) e não precisam rodar a varredura completa (alguns
-        segundos) duas vezes seguidas. Separa por REGISTRO (não por linha) porque o terminal
-        pode quebrar uma linha ao meio por causa da largura da tela -- os bytes reais do modem
-        não garantem isso."""
-        agora = time.time()
-        if self._csurv_cache is not None and (agora - self._csurv_cache_time) < max_age_s:
-            return self._csurv_cache
-        # confirmado em campo: chamar o #CSURV de novo logo depois de um anterior (sem dar
-        # tempo do rádio "descansar") faz o modem devolver uma varredura vazia/degenerada --
-        # forçamos um intervalo mínimo entre chamadas reais (não cacheadas) por causa disso.
-        espera = 2.0 - (agora - self._csurv_last_issue_time)
-        if espera > 0:
-            time.sleep(espera)
-        raw = self.send_at("AT#CSURV", timeout=30.0)  # varredura completa -- pode demorar mais
-        self._csurv_last_issue_time = time.time()
-        # sem \b -- confirmado em campo que às vezes um registro anterior gruda direto no
-        # próximo sem espaço/quebra de linha (ex.: "...mnc: 0earfcn: 1900 rxLev:...", visto
-        # numa captura real) -- \b falha aí porque dígito+letra não é fronteira de palavra,
-        # e o #CSURV inteiro virava 1 registro só em vez de vários.
-        self._csurv_cache = re.split(r"(?=(?:earfcn|uarfcn|nr_arfcn):)", raw)
-        self._csurv_cache_time = agora
-        return self._csurv_cache
+    def read_serving_info(self) -> ServInfoReading:
+        return parse_servinfo(self.send_at("AT#SERVINFO"))
 
-    def _find_pci_via_csurv(self, cell_id_hex: str) -> Optional[int]:
-        """Acha o phyCellId (PCI) do registro do #CSURV cujo cellId (decimal) bate com o
-        cell_id (hex) reportado pela #MONI -- ver docstring de get_serving_cell()."""
+    def scan_cells(self) -> CsurvReading:
+        """#CSURV com prazo de 3 min, descarte do que chega depois do OK e intervalo mínimo
+        entre varreduras (em campo, varreduras seguidas vieram vazias)."""
+        if self._last_csurv_end is not None:
+            wait = CSURV_MIN_INTERVAL_S - (time.monotonic() - self._last_csurv_end)
+            if wait > 0:
+                time.sleep(wait)
         try:
-            cell_id_dec = int(cell_id_hex, 16)
-        except ValueError:
-            return None
-        for record in self._get_csurv_records():
-            if not record.lstrip().startswith("earfcn:"):
-                continue
-            match = re.search(r"cellId:\s*(\d+).*?phyCellId:\s*(\d+)", record, re.S)
-            if match and int(match.group(1)) == cell_id_dec:
-                return int(match.group(2))
-        return None
+            resp = self.send_at("AT#CSURV", timeout=CSURV_TIMEOUT_S, drain_after=CSURV_DRAIN_S)
+        finally:
+            self._last_csurv_end = time.monotonic()
+        return parse_csurv(resp)
 
-    def get_neighbor_cells(self) -> List[NeighborCell]:
-        """Formato real confirmado em campo -- 1 registro por célula, um destes 3 tipos:
-        'nr_arfcn: 629952 nr_band: 78 nr_scs: 30 nr_mcc: 724 nr_mnc: 06' (5G NR -- sem RSRP
-        nesse formato, só ARFCN/banda, então ainda não dá pra usar como feature de sinal);
-        'earfcn: 3375 rxLev: -76 mcc: 724 mnc: 06 cellId: 257298023 tac: 34747 phyCellId: 254
-        cellStatus: CELL_SUITABLE rsrp: -107 rsrq: -12 bw: 15' (LTE -- é o que usamos aqui,
-        `phyCellId` = PCI); 'uarfcn: ... scr code: 2960 ... rscp: -78 ecio: -7.0' (3G/UMTS --
-        usa "scrambling code" em vez de PCI e RSCP em vez de RSRP, TODO: incorporar também)."""
-        neighbors: List[NeighborCell] = []
-        for record in self._get_csurv_records():
-            if not record.lstrip().startswith("earfcn:"):
-                continue  # TODO: incorporar "uarfcn:" (3G) -- "nr_arfcn:" não traz RSRP
-            match = re.search(r"phyCellId:\s*(\d+).*?rsrp:\s*(-?\d+\.?\d*)", record, re.S)
-            if match:
-                neighbors.append(NeighborCell(pci=int(match.group(1)), rsrp_dbm=float(match.group(2))))
-        return neighbors
+    def read_gnss(self) -> GnssReading:
+        return parse_gpsacp(self.send_at("AT$GPSACP"))
 
-    # ------------------------------------------------------------------ GNSS
-    def enable_gnss(self) -> None:
-        self.send_at("AT$GPSP=1")
-
-    def get_gnss_fix(self) -> Optional[GnssFix]:
-        raw = self.send_at("AT$GPSACP")
-        # Formato Telit: $GPSACP: <utc>,<lat>,<lon>,<hdop>,<alt>,<fix>,<cog>,<spkm>,<spkn>,<data>,<nsat>
-        match = re.search(r"\$GPSACP:\s*([^\r\n]+)", raw)
-        if not match:
-            return None
-        fields = [f.strip() for f in match.group(1).split(",")]
-        if len(fields) < 6 or not fields[1] or fields[5] in ("0", ""):
-            return None  # campo 'fix' = 0 (ou ausente) significa "sem posição ainda"
-        lat = nmea_to_decimal(fields[1])
-        lon = nmea_to_decimal(fields[2])
-        alt = float(fields[4]) if fields[4] else None
-        if lat is None or lon is None:
-            return None
-        return GnssFix(lat=lat, lon=lon, alt_m=alt, fix_quality=fields[5])
-
-    # ------------------------------------------------------------------ LPP/DL-AoD (experimental)
-    def enable_lpp_positioning(self) -> str:
-        """'Melhor esforço': habilita a sessão LPP e devolve a resposta bruta para log --
-        quem calcula a posição/ângulo é a rede, não este driver (ver arquitetura_hal.md)."""
-        return self.send_at("AT$LCSLPP=1", timeout=10.0)
-
-    def get_lpp_report(self) -> LppReport:
-        """'Melhor esforço': consulta o estado da sessão LPP habilitada por enable_lpp_positioning().
-        O comando exato de leitura do relatório e seu formato ainda não foram confirmados em
-        campo -- por enquanto isso só devolve o texto bruto e tenta 2 padrões genéricos de
-        ângulo/RSTD, que provavelmente precisarão ser ajustados assim que houver dados reais
-        (mesmo processo já usado para os outros comandos, ver guia_comandos_modem.md)."""
-        raw = self.send_at("AT$LCSLPP?", timeout=5.0)
-        angle = extract_float(raw, r"(?:ANGLE|AOA|AOD)\s*[:=]?\s*(-?\d+\.?\d*)")
-        rstd = extract_float(raw, r"RSTD\s*[:=]?\s*(-?\d+\.?\d*)")
-        return LppReport(raw_text=raw, angle_deg=angle, rstd=rstd)
+    def query_lpp_config(self) -> LppConfigProbe:
+        """Sonda experimental somente leitura (AT$LCSLPP?); nenhuma escrita de configuração."""
+        return parse_lpp_config(self.send_at("AT$LCSLPP?"))
