@@ -39,7 +39,7 @@ flowchart LR
     HAL -- "chamada síncrona" --> COL["coletor/\ndaemon de campanha\n(só alimenta o Fingerprint)"]
     COL -- "grava" --> DB[("SQLite\nradiomapa.db")]
     DB -- "treino/comparação (offline)" --> TREINO["estimador/train.py\nestimador/compare.py"]
-    TREINO -. "modelo .joblib" .-> LIVE
+    TREINO -. "bundle WKNN .json" .-> LIVE
     HAL -- "chamada síncrona" --> LIVE["estimador/live.py\nmedição ao vivo (online)"]
     LIVE --> POS["posição estimada\n(once ou continuous)"]
 ```
@@ -254,8 +254,8 @@ Só o **Fingerprint** usa aprendizado de máquina -- os outros 4 (`cell_id`, `ta
 ### Offline -- treino e comparação (dependem do radiomapa do Coletor)
 
 ```bash
-# Treinar o Fingerprint (único método que precisa treinar)
-python -m estimador.train --db radiomapa.db --technology 5G --out modelos/fingerprint_5g.joblib
+# Treinar o WKNN (banco v2; protocolo spatial = grupo por ponto, temporal = grupo por sessão)
+python -m estimador.train --db radiomapa_v2.db --technology LTE --protocol spatial --out modelos/wknn_lte_spatial.json
 
 # Comparar cell_id, ta, fingerprint (wknn e rf) no MESMO conjunto de teste -- tabela pronta p/ o Cap. 5
 python -m estimador.compare --db radiomapa.db --technology 5G --registry estimador/network_registry.json --out resultados_5g.csv
@@ -273,12 +273,12 @@ python -m estimador.infer aoa --anchor1 -26.900,-49.070 --bearing1 45 --anchor2 
 # once: tira 10 leituras (padrão), reporta média + desvio-padrão por método escolhido
 python -m estimador.live once --metodos cell_id,ta,fingerprint \
     --fn990-port /dev/ttyUSB2 --technology 5G --registry estimador/network_registry.json \
-    --fingerprint-modelo modelos/fingerprint_5g.joblib
+    --fingerprint-modelo modelos/wknn_lte_spatial.json
 
 # continuous: mede pra sempre a cada --interval segundos, logando cada estimativa num SQLite próprio, até Ctrl+C
 python -m estimador.live continuous --metodos cell_id,fingerprint --interval 5 \
     --fn990-port /dev/ttyUSB2 --technology 5G --registry estimador/network_registry.json \
-    --fingerprint-modelo modelos/fingerprint_5g.joblib --db estimador_estimativas.db
+    --fingerprint-modelo modelos/wknn_lte_spatial.json --db estimador_estimativas.db
 
 # --gnss-real lat,lon (opcional, os 2 modos aceitam): informa a posição real conhecida na hora,
 # pra já calcular e salvar o erro -- sem isso, usa o GNSS do próprio modem quando disponível
@@ -287,8 +287,10 @@ python -m estimador.live continuous --metodos cell_id,fingerprint --interval 5 \
 python -m estimador.relatorio --db estimador_estimativas.db --out resultados_live.csv
 ```
 
-O treino do Fingerprint exige pelo menos ~10 pontos no radiomapa (senão recusa e avisa). Os
-outros 4 métodos não precisam de nenhum dado histórico -- só do cadastro de posições.
+O treino do WKNN exige grupos suficientes no protocolo escolhido (pelo menos 3 pontos de
+referência ou 3 sessões com referência posicional) e encerra com
+`spatial_validation_unavailable`/`temporal_validation_unavailable: insufficient_groups` quando
+faltam; não há divisão aleatória por linha.
 
 ---
 
@@ -299,7 +301,8 @@ outros 4 métodos não precisam de nenhum dado histórico -- só do cadastro de 
 | `PermissionError` ao abrir `/dev/ttyUSBx` | Usuário não está no grupo `dialout` | `sudo usermod -aG dialout $USER` e fazer logout/login |
 | `ConnectionError: ... não respondeu OK a 'AT'` | Porta errada ou modem desligado | Confirme a porta com `ls /dev/ttyUSB*` e `python -m hal.cli --port ... alive` |
 | `erro: ... banco do Coletor no formato v1` | O `--db` aponta para um banco antigo | Use `python -m coletor.migrate inspect/migrate` para gerar uma cópia v2, ou um arquivo novo |
-| `erro: ... está no schema v2 do Coletor` ao rodar `estimador.train/compare/infer` | O Estimador legado só lê bancos v1 até a fase 5 | Use um radiomapa v1 antigo para o Estimador legado |
+| `erro: ... está no schema v2 do Coletor` ao rodar `estimador.compare/infer` | Essas ferramentas legadas só leem bancos v1 (serão consolidadas em `estimador.evaluate`) | Use um radiomapa v1 antigo com elas |
+| `erro: schema_v1: ...` ao rodar `estimador.train` | O treino lê só o schema v2 | Gere uma cópia v2 com `python -m coletor.migrate migrate` (as linhas migradas ficam fora do treino) |
 | Resposta vem sempre `ERROR` ou vazia | Porta serial errada (não é a porta AT) | Teste outras portas `ttyUSBx` até achar a que responde `OK` a `AT` |
 | `sqlite3.OperationalError: database is locked` | Duas instâncias do Coletor abertas ao mesmo tempo sobre o mesmo `.db` | Rode só 1 instância do Coletor por banco |
 | `estimador.train`/`infer`/`compare`/`live` dá erro de subcomando | Esqueceu o subcomando logo após o nome do módulo | Ex.: `python -m estimador.infer cell_id --db ...` (subcomando vem antes das flags) |

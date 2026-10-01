@@ -55,6 +55,11 @@ class CsurvCell:
     rsrp_dbm: Optional[float]
 
 
+def csurv_cell(radio_key: str, rat: str, plmn: Optional[str], cell_status: Optional[str], rsrp) -> CsurvCell:
+    """Única normalização de célula do #CSURV (banco e snapshot): RSRP 0 = não coletado (manual FN990, p. 819)."""
+    return CsurvCell(radio_key, rat, plmn, cell_status, None if rsrp in (None, 0) else float(rsrp))
+
+
 @dataclass(frozen=True)
 class ReferencePosition:
     lat: float
@@ -152,10 +157,7 @@ def load_dataset(db_path: str, allow_single_gnss: bool = False, min_gnss_for_med
             "SELECT measurement_id, rat, radio_key, plmn, cell_status, rsrp_dbm FROM observed_cells "
             "WHERE source = 'CSURV' AND radio_key IS NOT NULL ORDER BY observed_cell_id"
         ):
-            # RSRP 0 é "não coletado" no #CSURV (manual FN990, p. 819)
-            cells_by_measurement.setdefault(mid, []).append(
-                CsurvCell(radio_key, rat, plmn, status, None if rsrp in (None, 0) else float(rsrp))
-            )
+            cells_by_measurement.setdefault(mid, []).append(csurv_cell(radio_key, rat, plmn, status, rsrp))
         points = conn.execute(
             "SELECT reference_point_id, lat, lon, coord_source, coord_uncertainty_m FROM reference_points"
         ).fetchall()

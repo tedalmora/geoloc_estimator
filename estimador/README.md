@@ -71,8 +71,8 @@ célula for omnidirecional (ex.: o QCell indoor) ou se ainda não souber o azimu
 ## OFFLINE -- treino e comparação (dependem do Coletor)
 
 ```bash
-# Treinar o Fingerprint (único método que treina)
-python -m estimador.train --db radiomapa.db --technology 5G --out modelos/fingerprint_5g.joblib
+# Treinar o WKNN (banco v2; protocolo spatial = grupo por ponto, temporal = grupo por sessão)
+python -m estimador.train --db radiomapa_v2.db --technology LTE --protocol spatial --out modelos/wknn_lte_spatial.json
 
 # Comparar cell_id, ta, fingerprint (wknn e rf) no MESMO conjunto de teste -- tabela pronta p/ o Cap. 5
 python -m estimador.compare --db radiomapa.db --technology 5G --registry network_registry.json --out resultados_5g.csv
@@ -89,18 +89,18 @@ cadastrada daquela célula está errada.
 # e SALVA 1 linha por método em --db (padrão: estimador_estimativas.db)
 python -m estimador.live once --metodos cell_id,ta,fingerprint \
     --fn990-port /dev/ttyUSB2 --technology 5G --registry network_registry.json \
-    --fingerprint-modelo modelos/fingerprint_5g.joblib
+    --fingerprint-modelo modelos/wknn_lte_spatial.json
 
 # se você sabe a posição real na hora (ex.: parado num ponto já surveyado), informe com
 # --gnss-real -- o erro (haversine) já é calculado e salvo junto, sem precisar do GNSS do modem
 python -m estimador.live once --metodos cell_id,ta,fingerprint --gnss-real -26.9005,-49.0703 \
     --fn990-port /dev/ttyUSB2 --technology 5G --registry network_registry.json \
-    --fingerprint-modelo modelos/fingerprint_5g.joblib
+    --fingerprint-modelo modelos/wknn_lte_spatial.json
 
 # continuous: mede para sempre a cada --interval segundos, logando cada estimativa, até Ctrl+C
 python -m estimador.live continuous --metodos cell_id,fingerprint --interval 5 \
     --fn990-port /dev/ttyUSB2 --technology 5G --registry network_registry.json \
-    --fingerprint-modelo modelos/fingerprint_5g.joblib --db estimador_estimativas.db
+    --fingerprint-modelo modelos/wknn_lte_spatial.json --db estimador_estimativas.db
 
 # aoa precisa dos 2 ângulos (ainda extraídos manualmente do LPP) -- ficam fixos durante a execução
 python -m estimador.live once --metodos aoa \

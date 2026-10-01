@@ -37,16 +37,15 @@ import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
-import joblib
-
 from acquisition.snapshot import Snapshot, take_snapshot
 from hal.fn990_driver import FN990Driver
 from hal.health import HealthMonitor
-from hal.models import RAT_LTE, SOURCE_CSURV
 
 from . import db as estimador_db
-from .evaluate import haversine_m
+from .features import cells_from_observations
+from .geometry import haversine_m
 from .methods.aoa import estimate_position_from_bearings
+from .methods.fingerprint import BundleError, WknnModel, load_bundle
 from .methods.network_position import estimate_cell_position, estimate_cell_position_ta, load_registry
 
 METODOS_DISPONIVEIS = ("cell_id", "ta", "fingerprint", "aoa")
@@ -58,7 +57,7 @@ def _parse_latlon(text: str) -> Tuple[float, float]:
 
 
 def _estimar_uma_leitura(
-    metodo: str, leitura: Snapshot, registry: dict, fp_bundle: Optional[dict], technology: str,
+    metodo: str, leitura: Snapshot, registry: dict, fp_bundle: Optional[WknnModel], technology: str,
     aoa_bearings: Optional[tuple],
 ) -> Optional[dict]:
     """Aplica 1 método a 1 snapshot. Devolve {"lat", "lon", "raio_incerteza_m"}
@@ -76,15 +75,8 @@ def _estimar_uma_leitura(
     if metodo == "fingerprint":
         if fp_bundle is None:
             return None
-        from .methods.fingerprint import predict_fingerprint  # import tardio -- só paga o custo do scikit-learn se for usado
-        m_dict = {"serving_pci": serving_pci, "rsrp_dbm": leitura.serving_rsrp_dbm, "timing_advance": None}
-        neighbors_dicts = [
-            {"pci": o.pci, "rsrp_dbm": o.rsrp_dbm}
-            for o in leitura.observations
-            if o.source == SOURCE_CSURV and o.rat == RAT_LTE and o.pci is not None and o.rsrp_dbm is not None
-        ]
-        lat, lon = predict_fingerprint(fp_bundle, m_dict, neighbors_dicts, fp_bundle["vocabulary"])
-        return {"lat": lat, "lon": lon, "raio_incerteza_m": None}
+        estimativa = fp_bundle.predict(cells_from_observations(leitura.observations))
+        return {"lat": estimativa.lat, "lon": estimativa.lon, "raio_incerteza_m": None} if estimativa.valid else None
 
     if metodo == "aoa":
         if aoa_bearings is None:
@@ -222,9 +214,11 @@ def main() -> None:
     parser.add_argument("--metodos", required=True, help="separados por vírgula: " + ",".join(METODOS_DISPONIVEIS))
     parser.add_argument("--fn990-port", dest="fn990_port", required=True)
     parser.add_argument("--baudrate", type=int, default=115200)
-    parser.add_argument("--technology", default="5G", choices=["4G", "5G"])
+    parser.add_argument("--technology", default="5G", choices=["4G", "5G"],
+                        help="rótulo usado só pelo método ta legado (TA é revisto na fase 7)")
     parser.add_argument("--registry", default="estimador/network_registry.json")
-    parser.add_argument("--fingerprint-modelo", dest="fingerprint_modelo", default=None)
+    parser.add_argument("--fingerprint-modelo", dest="fingerprint_modelo", default=None,
+                        help="bundle WKNN em JSON gerado por 'python -m estimador.train'")
     parser.add_argument("--amostras", type=int, default=10, help="só usado no modo 'once'")
     parser.add_argument("--interval", type=float, default=5.0, help="só usado no modo 'continuous'")
     parser.add_argument("--db", default="estimador_estimativas.db", help="onde salvar as estimativas (once e continuous)")
@@ -244,7 +238,10 @@ def main() -> None:
             parser.error(f"método desconhecido: {metodo!r} (opções: {', '.join(METODOS_DISPONIVEIS)})")
 
     registry = load_registry(args.registry) if ("cell_id" in metodos or "ta" in metodos) else {}
-    fp_bundle = joblib.load(args.fingerprint_modelo) if ("fingerprint" in metodos and args.fingerprint_modelo) else None
+    try:
+        fp_bundle = load_bundle(args.fingerprint_modelo) if ("fingerprint" in metodos and args.fingerprint_modelo) else None
+    except BundleError as exc:
+        parser.error(str(exc))
 
     aoa_bearings = None
     if "aoa" in metodos and args.aoa_anchor1 and args.aoa_anchor2:

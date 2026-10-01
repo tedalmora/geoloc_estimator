@@ -17,7 +17,7 @@ import pytest
 
 from support import BlockingSerial, SilentSerial, at_lines, driver_com
 
-from radiomapa_sintetico import criar_radiomapa
+from radiomapa_sintetico import LOCAL_KEY, criar_radiomapa
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -181,30 +181,42 @@ def test_X02_csurv_rsrp_zero_e_ausente():
     assert [o.rsrp_dbm for o in obs if o.pci == 254] == [None]
 
 
-# --------------------------------------------------------------------------- F: features (Estimador legado)
-@pendente(5)
+# --------------------------------------------------------------------------- F: features do fingerprint
+def _politica_lte(plmn="72406"):
+    from estimador.features import CellFilterPolicy
+
+    return CellFilterPolicy("LTE", plmn)
+
+
 def test_F01_ta_ausente_nao_vira_zero():
-    from estimador.features import build_feature_vector
+    from estimador.dataset import CsurvCell
+    from estimador.features import vectorize
 
-    v = build_feature_vector({"serving_pci": 254, "rsrp_dbm": -107, "timing_advance": None}, [], [254])
-    assert 0 not in v[1:]
+    celulas = [CsurvCell("LTE:3375:254", "LTE", "72406", "CELL_SUITABLE", -107.0)]
+    vetor, _ = vectorize(celulas, _politica_lte(), ["LTE:3375:254", "LTE:3375:31"], -140.0)
+    assert vetor == [-107.0, -140.0]  # só RSRP por radio_key: não há coluna de TA nem zero
 
 
-@pendente(5)
 def test_F02_mesmo_pci_em_canais_diferentes_gera_colunas_distintas():
-    from estimador.features import build_feature_vector
+    from types import SimpleNamespace
 
-    v = build_feature_vector({"serving_pci": 254, "rsrp_dbm": -107, "timing_advance": None},
-                             [{"pci": 64, "rsrp_dbm": -99}, {"pci": 64, "rsrp_dbm": -97}], [64, 254])
-    assert -99 in v and -97 in v
+    from estimador.features import build_vocabulary, cells_from_observations, vectorize
+    from hal.parsing import parse_csurv
+
+    celulas = cells_from_observations(parse_csurv(resposta("AT#CSURV", "csurv_manual_exemplo.txt")).observations)
+    politica = _politica_lte("45005")
+    chaves, _ = build_vocabulary([SimpleNamespace(cells=celulas)], politica)
+    vetor, _ = vectorize(celulas, politica, chaves, -150.0)
+    assert {k: v for k, v in zip(chaves, vetor) if k.endswith(":64")} == {
+        "LTE:1350:64": -97.0, "LTE:2850:64": -99.0, "LTE:3200:64": -102.0}
 
 
-@pendente(5)
 def test_F03_rsrp_ausente_nao_injeta_none():
-    from estimador.features import build_feature_vector
+    from estimador.dataset import CsurvCell
+    from estimador.features import vectorize
 
-    v = build_feature_vector({"serving_pci": 254, "rsrp_dbm": None, "timing_advance": None}, [], [254])
-    assert None not in v
+    celulas = [CsurvCell("LTE:3375:254", "LTE", "72406", "CELL_SUITABLE", None)]
+    assert vectorize(celulas, _politica_lte(), ["LTE:3375:254"], -140.0) == ([-140.0], 0)
 
 
 # --------------------------------------------------------------------------- T: Timing Advance (legado)
@@ -359,34 +371,7 @@ def test_C08_sessao_encerrada_mesmo_com_excecao(monkeypatch, tmp_path, sem_esper
     assert status == "error" and fim is not None and "OperationalError" in motivo
 
 
-# --------------------------------------------------------------------------- D: dataset (Estimador legado)
-ESQUEMA_V1_MINIMO = """
-CREATE TABLE measurements (measurement_id INTEGER PRIMARY KEY, technology TEXT, serving_pci INTEGER,
-    rsrp_dbm REAL, timing_advance INTEGER, gnss_lat REAL, gnss_lon REAL);
-CREATE TABLE neighbor_cells (id INTEGER PRIMARY KEY, measurement_id INTEGER, pci INTEGER, rsrp_dbm REAL);
-"""
-
-
-@pytest.fixture
-def tabela_legado():
-    from estimador.features import build_training_table
-
-    conn = sqlite3.connect(":memory:")
-    conn.executescript(ESQUEMA_V1_MINIMO)
-    pontos = [(-26.900, -49.070), (-26.901, -49.071), (-26.902, -49.072)]
-    mid = 0
-    for k, (lat, lon) in enumerate(pontos):
-        for j in range(5):
-            mid += 1
-            conn.execute("INSERT INTO measurements VALUES (?, '5G', 254, ?, NULL, ?, ?)", (mid, -100.0 - k, lat, lon))
-            conn.execute("INSERT INTO neighbor_cells (measurement_id, pci, rsrp_dbm) VALUES (?, 64, ?)", (mid, -90.0 - j))
-            if (k, j) == (2, 4):
-                conn.execute("INSERT INTO neighbor_cells (measurement_id, pci, rsrp_dbm) VALUES (?, 999, -120)", (mid,))
-    X, y, vocab = build_training_table(conn, "5G")
-    conn.close()
-    return X, y, vocab
-
-
+# --------------------------------------------------------------------------- D: dataset e vocabulário (schema v2)
 def test_D01_mesmo_ponto_nao_aparece_em_treino_e_teste(tmp_path):
     from estimador.dataset import load_dataset, make_group_split, samples_in_groups
 
@@ -399,13 +384,25 @@ def test_D01_mesmo_ponto_nao_aparece_em_treino_e_teste(tmp_path):
     assert teste and selecao and not teste & selecao
 
 
-@pendente(5)
-def test_D02_vocabulario_construido_so_com_treino(tabela_legado):
-    _, _, vocab = tabela_legado
-    assert 999 not in vocab
+def test_D02_vocabulario_construido_so_com_treino(tmp_path):
+    from estimador.dataset import load_dataset
+    from estimador.features import build_vocabulary
+
+    banco = tmp_path / "d02.db"
+    criar_radiomapa(banco)
+    amostras = load_dataset(str(banco)).samples
+    treino = [s for s in amostras if s.reference_point_id != 6]  # P6 é o único ponto que vê a célula local
+    assert LOCAL_KEY in build_vocabulary(amostras, _politica_lte())[0]
+    assert LOCAL_KEY not in build_vocabulary(treino, _politica_lte())[0]
 
 
-@pendente(5)
-def test_D03_ta_fora_da_feature_padrao(tabela_legado):
-    X, _, _ = tabela_legado
-    assert "timing_advance" not in X.columns
+def test_D03_ta_fora_da_feature_padrao(tmp_path):
+    import re
+
+    from estimador.train import train
+
+    banco = tmp_path / "d03.db"
+    criar_radiomapa(banco)
+    bundle, _ = train(str(banco), "LTE", "spatial", str(tmp_path / "wknn.json"))
+    assert all(re.fullmatch(r"LTE:\d+:\d+", k) for k in bundle["cell_keys"])
+    assert "timing" not in json.dumps(bundle).lower()
