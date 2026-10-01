@@ -1,6 +1,6 @@
 # Estimador
 
-Estima a posição do UE a partir das leituras do modem. Desde a fase 5 da reconfiguração, o
+Estima a posição do UE a partir das leituras do modem. O
 Estimador principal tem dois métodos, ambos em Python puro (só a biblioteca padrão; o runtime
 continua precisando apenas do `pyserial`):
 
@@ -22,7 +22,7 @@ estimador/
     train.py       # OFFLINE: seleção e treino do WKNN; grava o bundle JSON
     evaluate.py    # métricas e os subcomandos compare, cell-id e live
     live.py        # ONLINE: 1 leitura do modem -> 1 estimativa (WKNN ou Cell-ID); não precisa do Coletor
-    db.py          # banco position_estimates do live.py antigo (até a fase 5); só leitura via evaluate live
+    db.py          # banco position_estimates do live.py anterior; só leitura via evaluate live
     network_registry.example.json   # modelo do cadastro de células
     methods/
         cell_id.py           # Cell-ID + validação do cadastro
@@ -120,8 +120,8 @@ GNSS e não usa TA, LPP nem geometria angular.
   (porta ou modem sem resposta); 2 para bundle, cadastro ou argumento inválido.
 
 `evaluate live` continua lendo, em modo somente leitura, bancos `position_estimates` gravados
-pelo `live.py` até a fase 5; o `live.py` atual não grava nesse banco.
+pelo `live.py` anterior; o `live.py` atual não grava nesse banco.
 
-Referências conceituais: `planejamento/arquitetura_estimadores_posicao.md` e
-`planejamento/knn_explicado.md`.
+Fontes de cada decisão: `planejamento/RASTREABILIDADE_CODIGO.md`. O `planejamento/knn_explicado.md`
+explica KNN/WKNN do zero, mas é documento histórico (arquivos e comandos do desenho anterior).
 

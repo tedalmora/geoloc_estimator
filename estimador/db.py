@@ -1,4 +1,4 @@
-"""Banco SQLite das estimativas gravadas pelo estimador/live.py até a fase 5 (position_estimates).
+"""Banco SQLite das estimativas gravadas pelo estimador/live.py anterior (position_estimates).
 
 O live.py atual (modo once) não grava neste banco. O módulo fica só para descrever o formato
 dos arquivos já existentes, que `python -m estimador.evaluate live` lê em modo somente leitura.

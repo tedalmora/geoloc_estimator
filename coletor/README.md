@@ -1,7 +1,5 @@
 # Coletor — grava snapshots da aquisição no banco v2
 
-> Documento de trabalho da Etapa 2 (fase 4). A documentação final será revisada em fase posterior.
-
 O Coletor executa sessões de coleta. Cada ciclo é um snapshot da aquisição compartilhada
 ([`acquisition/snapshot.py`](../acquisition/snapshot.py)): `#MONI`, `#SERVINFO`, 1 `#CSURV`
 e `$GPSACP`. O snapshot é gravado no SQLite com status, motivos, latências, todas as células
@@ -70,8 +68,8 @@ Nenhuma configuração persistente do modem é alterada.
 | `health_checks` | eventos de saúde ligados à sessão |
 
 Um banco v1 (antigo) é recusado com instruções, sem nenhuma alteração. A coluna
-`measurements.lpp_probe_status` continua no schema v2, sempre vazia: a sonda LPP saiu do Coletor
-na fase 7 e fica só em `experimental/lpp_probe.py`.
+`measurements.lpp_probe_status` continua no schema v2, sempre vazia: a sonda LPP não faz parte
+do Coletor e fica só em `experimental/lpp_probe.py`.
 
 ## Export completo e restauração
 

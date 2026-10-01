@@ -1,15 +1,31 @@
-# Código do TCC — HAL, Coletor e Estimador de Posição
+# Código do TCC — aquisição de observáveis celulares e posicionamento com o FN990
 
-Implementação em Python das 3 camadas definidas em `planejamento/arquitetura_hal.md`,
-`planejamento/arquitetura_coleta_dados.md` e `planejamento/arquitetura_estimadores_posicao.md`.
-Este README foca em **como instalar e rodar numa Raspberry Pi** e em como os 3 componentes se
-encaixam. **Cada componente tem seu próprio README, mais detalhado**, explicando o que ele faz
-sozinho e qual tipo de geolocalização ele serve:
+Plataforma em Python para um Raspberry Pi com o modem Telit Cinterion FN990: HAL (comandos AT),
+aquisição compartilhada (snapshot), Coletor (sessões em SQLite) e Estimador (Cell-ID e
+*fingerprinting* multicélula com WKNN). O FN990 é o único modem implementado e validado. O hardware
+atual é um Raspberry Pi 3 Model B Rev 1.2 (alvo: imagem Buildroot; as leituras de campo anteriores
+foram feitas com Raspberry Pi OS). Este README cobre instalação, execução e interpretação dos
+resultados; cada componente tem o seu:
 
 - [`hal/README.md`](hal/README.md) — a biblioteca que fala com o modem.
-- [`coletor/README.md`](coletor/README.md) — o daemon que constrói o radiomapa (treino do WKNN e avaliação).
-- [`estimador/README.md`](estimador/README.md) — Cell-ID e fingerprinting WKNN: treino offline, avaliação e medição ao vivo.
+- [`coletor/README.md`](coletor/README.md) — sessões de coleta, banco v2, backup e migração.
+- [`estimador/README.md`](estimador/README.md) — Cell-ID e WKNN: treino, avaliação e inferência atual.
 - [`deprecated/README.md`](deprecated/README.md) — scripts antigos guardados só como histórico (não rodam).
+- `experimental/` — TA, sonda LPP e geometria de bearings (ver a seção 7 e a docstring de cada módulo).
+
+### Situação de cada parte
+
+| Parte | Situação |
+|---|---|
+| HAL do FN990 (`#MONI`, `#SERVINFO`, `#CSURV`, `$GPSACP`, `$GPSP?`) | implementado e coberto por testes com respostas rotuladas. Em campo (Vivo, set/2026) foram confirmados a linha LTE do `#SERVINFO`, os rótulos do `#MONI` LTE, registros do `#CSURV` e o formato do fix do `$GPSACP`; EN-DC conectado, NR SA e `$GPSP?` vêm só do manual |
+| Aquisição e Coletor (snapshot `complete`/`partial`/`invalid`, latências, sessões, banco v2, health checks, export, migração do v1) | implementado e testado com modem simulado; nenhuma campanha foi feita com o código atual |
+| Cell-ID por `global_cell_key` | implementado e testado; depende do cadastro real das células, ainda não levantado |
+| *Fingerprinting* WKNN (treino com validação `spatial`/`temporal`, avaliação, inferência atual) | implementado e testado com radiomapas sintéticos; ainda sem radiomapa v2 de campo |
+| Validação no hardware (Pi 3 + FN990) | roteiro em `planejamento/VALIDACAO_HARDWARE_RPI3_FN990.md`; ainda não executado |
+| Cell-ID com Timing Advance | condicionado: o firmware em uso não expõe TA; o código experimental devolve `unavailable`/`unsupported` |
+| DL-AoD e UL-AoA | condicionados: não há ângulo medido; só existe a geometria de bearings com ângulos externos (experimental) |
+| LPP | só a sonda experimental que consulta `AT$LCSLPP?` |
+| Fora do escopo | Random Forest, E-CID de rede, outros modems (EM7565, EM120R-GL), QMI/MBIM, *fingerprinting* multifeixe, posicionamento veicular e 3D, DL-TDoA/UL-TDoA/Multi-RTT |
 
 ```
 codigo/
@@ -32,23 +48,24 @@ codigo/
     README.md         # este arquivo
 ```
 
-### Como os 3 componentes conversam entre si
+### Como os componentes conversam entre si
 
 ```mermaid
 flowchart LR
     MODEM["Modem (FN990)"] -- "AT" --> HAL["hal/\nbiblioteca on-demand"]
-    HAL -- "chamada síncrona" --> COL["coletor/\ndaemon de campanha\n(radiomapa)"]
-    COL -- "grava" --> DB[("SQLite\nradiomapa.db")]
+    HAL --> ACQ["acquisition/\n1 snapshot com status"]
+    ACQ -- "chamada síncrona" --> COL["coletor/\nsessões de coleta"]
+    COL -- "grava" --> DB[("SQLite\nradiomapa_v2.db")]
     DB -- "treino/avaliação (offline)" --> TREINO["estimador/train.py\nestimador/evaluate.py"]
     TREINO -. "bundle WKNN .json" .-> LIVE
-    HAL -- "chamada síncrona" --> LIVE["estimador/live.py\nmedição ao vivo (online)"]
+    ACQ -- "chamada síncrona" --> LIVE["estimador/live.py\ninferência atual (online)"]
     LIVE --> POS["posição estimada\n(1 leitura, modo once)"]
 ```
 
-O HAL não sabe que o Coletor ou o `live.py` existem (só responde quando chamado). O Coletor
-só grava o que o HAL devolve; o radiomapa alimenta o treino do WKNN e a avaliação do Cell-ID.
-`live.py` fala com o HAL **diretamente**, sem depender do Coletor estar rodando, para
-responder "onde estou agora".
+O HAL não sabe que o Coletor ou o `live.py` existem (só responde quando chamado). Os dois usam a
+mesma aquisição (`acquisition/snapshot.py`), que chama o HAL. O Coletor grava os snapshots; o
+radiomapa alimenta o treino do WKNN e a avaliação do Cell-ID. O `live.py` não depende do Coletor
+estar rodando: faz 1 leitura para responder "onde estou agora".
 
 ### Métodos de posição
 
@@ -63,16 +80,14 @@ responder "onde estou agora".
 
 ## 1. Requisitos
 
-- Raspberry Pi 3 ou 4 com Raspberry Pi OS (Debian) — ou uma imagem Buildroot própria (ver nota no fim desta seção).
+- Raspberry Pi 3 Model B Rev 1.2 (hardware atual; confira com `cat /proc/device-tree/model`), com a
+  imagem Buildroot do projeto ou com Raspberry Pi OS.
 - Python 3.9 ou mais novo (`python3 --version`).
-- Modem Telit FN990 (ou compatível) conectado via o adaptador M.2 → USB.
+- Modem Telit Cinterion FN990 conectado pelo adaptador M.2 → USB.
 - Acesso root/sudo, ao menos na primeira configuração.
 
-**Nota Buildroot:** se você estiver usando a imagem Buildroot customizada do projeto (em vez do
-Raspberry Pi OS), instale `python3-pyserial` como pacote do `menuconfig` em vez de usar `pip`
-(é a única dependência de runtime). Se
-`python3-pyserial` não estiver disponível, existe um plano B sem `pyserial` descrito em
-`planejamento/arquitetura_hal.md`, Seção 1.
+**Nota Buildroot:** na imagem Buildroot, instale `python3-pyserial` como pacote do `menuconfig`
+em vez de usar `pip` (é a única dependência de runtime; o Estimador é Python puro).
 
 ---
 
@@ -94,7 +109,7 @@ source venv/bin/activate
 
 # 4. Instalar as dependências Python
 #    requirements.txt (só pyserial) basta para HAL, aquisição, Coletor e o Estimador ativo
-#    (train/live são Python puro). requirements-dev.txt é só para o PC (pytest e scripts legados).
+#    (train/live são Python puro). requirements-dev.txt é só para o PC (acrescenta o pytest).
 pip install -r requirements.txt
 
 # 5. Dar permissão de acesso à porta serial do modem (evita precisar rodar tudo como root)
@@ -137,17 +152,16 @@ conferidos no manual do FN990 (Rev.5) e em fragmentos de campo, e os parsers tê
 fixtures rotuladas (`tests/fixtures/at/`). Uma resposta fora do formato esperado vira
 `status: malformed`, sem exceção; nesse caso, guarde a resposta crua e acrescente uma fixture.
 
-Para ver um ciclo completo, como o Coletor e o `live.py` leem o modem:
+Para ver uma leitura completa (o mesmo snapshot usado pelo Coletor e pelo `live.py`):
 
 ```bash
-python -m acquisition.snapshot --port /dev/ttyUSB2               # prepare + 1 snapshot em JSON
+python -m acquisition.snapshot --port /dev/ttyUSB2               # prepare do GNSS + 1 snapshot em JSON
+python -m acquisition.snapshot --port /dev/ttyUSB2 --no-prepare  # só o snapshot, como no live.py
 ```
 
 O snapshot sai `complete`, `partial` ou `invalid`, com os motivos (`reasons`) e a latência de
 cada comando (`timings_s`). Ele traz a servidora com `radio_key`/`global_cell_key` e todas as
 observações de célula, cada uma com a fonte (`MONI`, `SERVINFO` ou `CSURV`).
-
-Testes automatizados (no PC, com `pip install -r requirements-dev.txt`): `python -m pytest`.
 
 ---
 
@@ -173,7 +187,8 @@ python -m coletor.daemon continuous --port /dev/ttyUSB2 --db radiomapa_v2.db --i
     --scenario pedestre --environment outdoor --route trilha_1 --campaign-plmn 72406
 ```
 
-- `--scenario`: `estatico` | `pedestre` | `veicular`
+- `--scenario`: `estatico` | `pedestre` | `veicular` (só rótulo da sessão; não há método de
+  posicionamento veicular)
 - `--environment`: `indoor` | `outdoor`
 - `--reference-point NOME` ou `--route NOME`: um dos dois é obrigatório
 - `--db`: arquivo SQLite v2, criado se não existir. Na Raspberry Pi, use uma partição de dados
@@ -265,7 +280,60 @@ faltam; não há divisão aleatória por linha.
 
 ---
 
-## 6. Solução de problemas comuns
+## 6. Como interpretar falhas e cobertura
+
+- **Snapshot:** `complete` (todas as leituras `ok` e a servidora com as duas chaves), `partial`
+  (há célula, mas algo faltou) ou `invalid` (nenhuma célula). Os motivos ficam em `reasons`, no
+  formato `comando:status` (ex.: `gnss:no_fix`, `csurv:timeout`), mais `erro_de_porta`,
+  `modem_sem_resposta`, `servidora_sem_radio_key:<método>` e `servidora_sem_global_cell_key`. O
+  Coletor grava todas as tentativas, inclusive as inválidas.
+- **Estimativa** (`PositionEstimate`): `valid`, `unavailable`, `technology_mismatch`,
+  `unknown_cell`, `missing_global_cell_key`, `invalid_registry` e `invalid_input` no caminho
+  principal; `unsupported` e `geometry_degenerate` só nos módulos experimentais. Sem estimativa,
+  `lat`/`lon` ficam vazios e `reason` diz o porquê; nunca há coordenada inventada.
+- **Cobertura** = estimativas válidas / leituras avaliadas. Os erros (média, mediana/CE50, RMSE,
+  p90, p95, máximo e CDF) são calculados só sobre as válidas, sempre junto da cobertura e da
+  contagem de cada estado.
+- **Referência posicional:** coordenada cadastrada do ponto; senão, mediana de pelo menos 3
+  leituras GNSS do ponto, com a dispersão registrada. O GNSS do modem tem incerteza própria e não
+  é tratado como verdade absoluta.
+- **Protocolos:** resultados `spatial` (pontos novos) e `temporal` (sessões novas nos mesmos
+  pontos) medem capacidades diferentes e são relatados separadamente.
+
+## 7. Componentes experimentais (`experimental/`)
+
+Isolados do caminho principal (nenhum módulo de `hal/`, `acquisition/`, `coletor/` ou
+`estimador/` os importa; um teste confere isso) e não apresentados como métodos validados:
+
+- `timing_advance.py`: faixa de distância em torno da antena a partir do TA. TA ausente →
+  `unavailable`; sem conversão declarada e confirmada (`TaConversion`) → `unsupported`. Não há
+  constante de metros por passo nem projeção pelo azimute do setor.
+- `angular_geometry.py`: interseção de duas semirretas a partir de bearings externos, com
+  validação de geometria (âncoras iguais, paralelas, interseção atrás da âncora, distância máxima).
+- `lpp_probe.py`: só consulta `AT$LCSLPP?` e registra comando, resposta bruta, status, erro e horário:
+
+```bash
+python -m experimental.lpp_probe --port /dev/ttyUSB2 --out sonda_lpp.json
+```
+
+## 8. Testes automatizados
+
+No PC, a partir de `codigo/`, com `pip install -r requirements-dev.txt` (só `pytest`):
+
+```bash
+python -m pytest
+```
+
+Os testes usam respostas AT rotuladas (`tests/fixtures/at/`, com a origem de cada uma no
+cabeçalho), portas seriais simuladas, relógio virtual e radiomapas sintéticos
+(`tests/radiomapa_sintetico.py`). Nenhum teste usa modem, banco ou modelo real; dados sintéticos
+não são resultado experimental. `tests/test_auditoria.py` mantém as verificações da auditoria
+inicial (63 casos, com o B01 parametrizado por módulo), todas obrigatórias. A rastreabilidade
+entre requisitos, código e testes está em `planejamento/RASTREABILIDADE_CODIGO.md`.
+
+---
+
+## 9. Solução de problemas comuns
 
 | Sintoma | Causa provável | O que fazer |
 |---|---|---|
@@ -284,13 +352,13 @@ faltam; não há divisão aleatória por linha.
 
 ---
 
----
+## 10. Documentação relacionada
 
-## 7. Para entender cada componente em detalhe
-
-- [`hal/README.md`](hal/README.md) / [`coletor/README.md`](coletor/README.md) / [`estimador/README.md`](estimador/README.md) — o que cada componente faz, sozinho, e para qual geolocalização serve.
-- [`planejamento/arquitetura_hal.md`](../planejamento/arquitetura_hal.md) — por que o HAL é uma biblioteca on-demand, não um daemon.
-- [`planejamento/arquitetura_coleta_dados.md`](../planejamento/arquitetura_coleta_dados.md) — concorrência, schema do banco, ciclo de vida de sessão.
-- [`planejamento/arquitetura_estimadores_posicao.md`](../planejamento/arquitetura_estimadores_posicao.md) — vocabulário de features, treino, métricas.
-- [`planejamento/knn_explicado.md`](../planejamento/knn_explicado.md) — conceitos de KNN/WKNN do zero.
-- [`planejamento/guia_comandos_modem.md`](../planejamento/guia_comandos_modem.md) — comandos AT confirmados no FN990 real.
+- [`hal/README.md`](hal/README.md) / [`coletor/README.md`](coletor/README.md) / [`estimador/README.md`](estimador/README.md) — cada componente em detalhe.
+- [`planejamento/RASTREABILIDADE_CODIGO.md`](../planejamento/RASTREABILIDADE_CODIGO.md) — requisitos, observáveis, código, testes e fontes.
+- [`planejamento/VALIDACAO_HARDWARE_RPI3_FN990.md`](../planejamento/VALIDACAO_HARDWARE_RPI3_FN990.md) — roteiro de validação no hardware.
+- [`planejamento/divergencias_codigo_tcc.md`](../planejamento/divergencias_codigo_tcc.md) — divergências e verificações pendentes.
+- [`planejamento/fontes_extraidas/INVENTARIO_EXTRACOES.md`](../planejamento/fontes_extraidas/INVENTARIO_EXTRACOES.md) — fontes e índice das que sustentam decisões de código.
+- [`planejamento/guia_comandos_modem.md`](../planejamento/guia_comandos_modem.md) — comandos AT do FN990 (documento de apoio).
+- Os documentos de arquitetura em `planejamento/` (`arquitetura_*.md`, `knn_explicado.md`,
+  `visao_geral_projeto.md`) são históricos: descrevem o desenho anterior à reconfiguração.

@@ -6,8 +6,6 @@ espera o código final dentro de um prazo e devolve uma leitura tipada com `stat
 Não há laço, sessão nem banco de dados. Quem chama o HAL é a aquisição compartilhada
 (Coletor e medição ao vivo).
 
-> Documento de trabalho da Etapa 2 (fase 2). A documentação final será revisada em fase posterior.
-
 ```
 hal/
     models.py         # observações de célula, chaves de identidade, leituras, AtResponse
@@ -80,7 +78,8 @@ python -m hal.cli --port /dev/ttyUSB2 reboot      # ALTERA ESTADO: reinicia o mo
 A partir de `codigo/`, com `requirements-dev.txt` instalado: `python -m pytest tests/test_hal.py`.
 As respostas usadas estão em `tests/fixtures/at/`, cada uma com origem declarada no cabeçalho.
 
-## Outros modems (EM7565, EM120R-GL)
+## Outros modems
 
-Um driver novo implementa o contrato de `modem_driver.py`, com o dialeto AT de cada modem
-levantado via `AT+CLAC`. Para isso, ele deve devolver as mesmas leituras de `models.py`.
+O FN990 é o único modem implementado e validado. `modem_driver.py` é só a interface interna que
+o `fn990_driver.py` implementa e que os testes simulam. EM7565, EM120R-GL e outros modems estão
+fora do escopo deste trabalho.

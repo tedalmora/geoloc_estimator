@@ -17,7 +17,7 @@ protocolo (spatial ou temporal) e a coluna de grupo: resultados de protocolos di
 equivalentes. Também informa o tempo de carga do bundle e a latência do WKNN por amostra (média,
 p95 e máximo), usados na validação do runtime no Raspberry Pi.
 cell-id: confronta o cadastro com todas as amostras rotuladas, com o erro por célula servidora.
-live: resumo por método de bancos position_estimates gravados pelo `estimador.live` até a fase 5
+live: resumo por método de bancos position_estimates gravados pelo `estimador.live` anterior
 (no antigo modo `once`, cada linha já é a média de N leituras); o live.py atual não grava.
 """
 import argparse
@@ -246,7 +246,7 @@ def main(argv=None) -> None:
                    help="inclui rotas com leitura GNSS isolada como referência")
     p.add_argument("--out", help="CSV com o erro por célula servidora")
     p.add_argument("--json-out", dest="json_out")
-    p = sub.add_parser("live", help="resumo de bancos position_estimates gravados pelo live.py até a fase 5")
+    p = sub.add_parser("live", help="resumo de bancos position_estimates gravados pelo live.py anterior")
     p.add_argument("--db", default="estimador_estimativas.db")
     p.add_argument("--out", help="CSV com o resumo por método")
     args = parser.parse_args(argv)
