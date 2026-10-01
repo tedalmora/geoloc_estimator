@@ -268,11 +268,11 @@ def test_save_bundle_nao_sobrescreve_e_exige_json(treino_spatial, tmp_path):
     assert os.path.getsize(saida) == tamanho
 
 
-def test_random_forest_e_scikit_learn_fora_do_codigo_ativo():
+def test_random_forest_e_bibliotecas_numericas_fora_do_codigo_ativo():
     import re
 
     raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    proibido = re.compile(r"^\s*(from|import)\s+(sklearn|joblib)\b|RandomForest", re.MULTILINE)
+    proibido = re.compile(r"^\s*(from|import)\s+(sklearn|joblib|pandas|numpy)\b|RandomForest", re.MULTILINE)
     for pacote in ("acquisition", "coletor", "estimador", "hal"):
         for pasta, _, arquivos in os.walk(os.path.join(raiz, pacote)):
             for nome in arquivos:
@@ -281,7 +281,7 @@ def test_random_forest_e_scikit_learn_fora_do_codigo_ativo():
                         assert not proibido.search(f.read()), os.path.join(pasta, nome)
     for nome in ("requirements.txt", "requirements-dev.txt"):
         with open(os.path.join(raiz, nome), encoding="utf-8") as f:
-            assert not re.search(r"scikit-learn|joblib", f.read()), nome
+            assert not re.search(r"scikit-learn|joblib|pandas|numpy", f.read()), nome
     import estimador.methods.fingerprint as fp
 
     assert not hasattr(fp, "train_fingerprint") and not hasattr(fp, "predict_fingerprint")

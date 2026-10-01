@@ -7,8 +7,9 @@ encaixam. **Cada componente tem seu próprio README, mais detalhado**, explicand
 sozinho e qual tipo de geolocalização ele serve:
 
 - [`hal/README.md`](hal/README.md) — a biblioteca que fala com o modem.
-- [`coletor/README.md`](coletor/README.md) — o daemon que constrói o radiomapa (só para o Fingerprint treinar).
-- [`estimador/README.md`](estimador/README.md) — os 5 métodos de estimativa de posição (treino offline + medição ao vivo).
+- [`coletor/README.md`](coletor/README.md) — o daemon que constrói o radiomapa (treino do WKNN e avaliação).
+- [`estimador/README.md`](estimador/README.md) — Cell-ID e fingerprinting WKNN: treino offline, avaliação e medição ao vivo.
+- [`deprecated/README.md`](deprecated/README.md) — scripts antigos guardados só como histórico (não rodam).
 
 ```
 codigo/
@@ -16,18 +17,18 @@ codigo/
         health.py             # monitor de saúde da conexão -- usado pelo Coletor E pelo estimador/live.py
     acquisition/      # aquisição compartilhada: 1 snapshot (MONI, SERVINFO, CSURV, GNSS) com status e motivos
     coletor/          # o daemon de campanha de campo (grava snapshots no SQLite)
-    estimador/        # OFFLINE (train.py/compare.py) + ONLINE (live.py), 5 métodos em estimador/methods/
-        network_registry.example.json  # cadastro de posição/azimute das células -- copie e preencha
+    estimador/        # Cell-ID + WKNN: OFFLINE (train.py, evaluate.py) e ONLINE (live.py); detalhes no README dele
+        network_registry.example.json  # modelo do cadastro de células (por global_cell_key) -- copie e preencha
         live.py                # ONLINE -- mede a posição agora, 1+ métodos ao mesmo tempo, sem depender do Coletor
         db.py                   # SQLite próprio (position_estimates) -- o que live.py salva
-        relatorio.py            # compara os métodos usando o que live.py salvou
         methods/
             cell_id.py            # Cell-ID por global_cell_key + validação do cadastro (baseline)
-            network_position.py  # Cell-ID/E-CID, E-CID de rede, Cell-ID+TA -- sem ML, cadastro conhecido
             fingerprint.py        # Fingerprinting WKNN (Python puro, bundle JSON) -- único com treino
-            aoa.py                 # DL-AoD/UL-AoA (geometria pura, sem ML)
-    requirements.txt      # runtime do alvo: só pyserial (HAL, aquisição, Coletor)
-    requirements-dev.txt  # PC de desenvolvimento: pytest + dependências do Estimador legado (até a fase 5)
+            network_position.py  # Cell-ID + TA -- legado, revisto na fase 7
+            aoa.py                 # DL-AoD/UL-AoA (geometria pura) -- legado, revisto na fase 7
+    deprecated/       # histórico (compare/infer/relatorio antigos); nada ativo importa daqui
+    requirements.txt      # runtime do alvo: só pyserial (HAL, aquisição, Coletor, Estimador)
+    requirements-dev.txt  # PC de desenvolvimento: pytest
     tests/                # pytest; fixtures AT rotuladas em tests/fixtures/at/
     README.md         # este arquivo
 ```
@@ -37,31 +38,27 @@ codigo/
 ```mermaid
 flowchart LR
     MODEM["Modem (FN990)"] -- "AT" --> HAL["hal/\nbiblioteca on-demand"]
-    HAL -- "chamada síncrona" --> COL["coletor/\ndaemon de campanha\n(só alimenta o Fingerprint)"]
+    HAL -- "chamada síncrona" --> COL["coletor/\ndaemon de campanha\n(radiomapa)"]
     COL -- "grava" --> DB[("SQLite\nradiomapa.db")]
-    DB -- "treino/comparação (offline)" --> TREINO["estimador/train.py\nestimador/compare.py"]
+    DB -- "treino/avaliação (offline)" --> TREINO["estimador/train.py\nestimador/evaluate.py"]
     TREINO -. "bundle WKNN .json" .-> LIVE
     HAL -- "chamada síncrona" --> LIVE["estimador/live.py\nmedição ao vivo (online)"]
     LIVE --> POS["posição estimada\n(once ou continuous)"]
 ```
 
 O HAL não sabe que o Coletor ou o `live.py` existem (só responde quando chamado). O Coletor
-só grava o que o HAL devolve -- hoje isso só alimenta o treino do Fingerprint. `live.py` fala
-com o HAL **diretamente**, sem depender do Coletor estar rodando, para responder "onde estou
-agora" com qualquer um dos 5 métodos.
+só grava o que o HAL devolve; o radiomapa alimenta o treino do WKNN e a avaliação do Cell-ID.
+`live.py` fala com o HAL **diretamente**, sem depender do Coletor estar rodando, para
+responder "onde estou agora".
 
-### Resposta direta: "dá pra fazer todos os tipos de geolocalização que vou tentar, até AoA?"
+### Métodos de posição
 
-**Sim.** E com controle total do core (você vai saber a posição real das células), 4 dos 5
-métodos viraram cálculo direto -- só o Fingerprint ainda usa aprendizado de máquina:
-
-| Método | Usa ML? | Precisa do Coletor/radiomapa? | Como medir agora |
+| Método | Situação | Precisa do radiomapa? | Como usar |
 |---|---|---|---|
-| Cell-ID / E-CID | Não | Não | `estimador.live` ou `estimador.infer cell_id` |
-| E-CID de rede | Não | Não | mesma função do Cell-ID -- só falta a integração com o core (ver `estimador/README.md`) |
-| Cell-ID + Timing Advance | Não | Não | `estimador.live` ou `estimador.infer ta` -- **hoje se comporta igual ao Cell-ID puro**: o TA não é exposto pelo firmware atual do modem, só com upgrade (ver `hal/README.md`) |
-| Fingerprinting | **Sim** | **Sim** -- único que precisa | `estimador.train` (offline) depois `estimador.live` |
-| DL-AoD / UL-AoA | Não | Não | `estimador.live`/`infer aoa` -- mas o **ângulo** ainda precisa ser extraído manualmente do relatório LPP (ver `hal/README.md`) |
+| Cell-ID (`global_cell_key` → posição cadastrada da célula) | principal (baseline) | Para avaliar, sim | `estimador.live`; `estimador.evaluate cell-id`/`compare` |
+| Fingerprinting WKNN | principal | **Sim** | `estimador.train` (offline), `estimador.evaluate compare`, `estimador.live` |
+| Cell-ID + Timing Advance | legado, fase 7 | Não | `estimador.live` -- **hoje igual ao Cell-ID**: o firmware atual não expõe TA (ver `hal/README.md`) |
+| DL-AoD / UL-AoA | legado, fase 7 | Não | `estimador.live` -- os ângulos ainda são digitados (ver `hal/README.md`) |
 
 ---
 
@@ -244,46 +241,33 @@ journalctl -u coletor-tcc.service -f   # acompanhar o log em tempo real
 
 ---
 
-## 5. Estimador — 5 métodos: treino offline + medição ao vivo
+## 5. Estimador — Cell-ID e WKNN: treino offline, avaliação e medição ao vivo
 
-Só o **Fingerprint** usa aprendizado de máquina -- os outros 4 (`cell_id`, `ta`, `ecid_rede`,
-`aoa`) são cálculo direto sobre um cadastro de posições conhecidas que você preenche (copie
-`estimador/network_registry.example.json` para `estimador/network_registry.json`). **Ver
-[`estimador/README.md`](estimador/README.md) para a tabela completa.**
-
-### Offline -- treino e comparação (dependem do radiomapa do Coletor)
+O Cell-ID devolve a posição cadastrada da célula servidora (busca pela `global_cell_key` em
+`estimador/network_registry.json`; copie o `.example.json`). O WKNN usa o RSRP das células do
+`#CSURV` e é treinado com o radiomapa v2. Protocolos, bundle e cadastro: **ver
+[`estimador/README.md`](estimador/README.md).**
 
 ```bash
-# Treinar o WKNN (banco v2; protocolo spatial = grupo por ponto, temporal = grupo por sessão)
+# treino (spatial = grupo por ponto de referência; temporal = grupo por sessão)
 python -m estimador.train --db radiomapa_v2.db --technology LTE --protocol spatial --out modelos/wknn_lte_spatial.json
+python -m estimador.train --db radiomapa_v2.db --technology LTE --protocol temporal --out modelos/wknn_lte_temporal.json
 
-# LEGADO (banco v1): cell_id/ta por PCI num sorteio de 20% das medições
-python -m estimador.compare --db radiomapa.db --technology 5G --registry estimador/network_registry.json --out resultados_5g.csv
+# WKNN e Cell-ID nas mesmas amostras de teste do bundle; validação do cadastro
+python -m estimador.evaluate compare --db radiomapa_v2.db --model modelos/wknn_lte_spatial.json \
+    --registry estimador/network_registry.json --out resumo_spatial.csv
+python -m estimador.evaluate cell-id --db radiomapa_v2.db --registry estimador/network_registry.json
 
-# Inferir a partir da última leitura já gravada no banco (LEGADO, banco v1)
-python -m estimador.infer cell_id --db radiomapa.db --technology 5G --registry estimador/network_registry.json
-python -m estimador.infer ta      --db radiomapa.db --technology 5G --registry estimador/network_registry.json
-python -m estimador.infer aoa --anchor1 -26.900,-49.070 --bearing1 45 --anchor2 -26.901,-49.071 --bearing2 300
-```
+# medir agora, sem depender do Coletor (once: N leituras; continuous: até Ctrl+C)
+python -m estimador.live once --metodos cell_id,fingerprint --fn990-port /dev/ttyUSB2 \
+    --registry estimador/network_registry.json --fingerprint-modelo modelos/wknn_lte_spatial.json
+python -m estimador.live continuous --metodos cell_id,fingerprint --interval 5 --fn990-port /dev/ttyUSB2 \
+    --registry estimador/network_registry.json --fingerprint-modelo modelos/wknn_lte_spatial.json \
+    --db estimador_estimativas.db
+# --gnss-real lat,lon (opcional): posição verdadeira na hora, para gravar o erro
 
-### Online -- medir a posição AGORA, sem depender do Coletor (`estimador/live.py`)
-
-```bash
-# once: tira 10 leituras (padrão), reporta média + desvio-padrão por método escolhido
-python -m estimador.live once --metodos cell_id,ta,fingerprint \
-    --fn990-port /dev/ttyUSB2 --technology 5G --registry estimador/network_registry.json \
-    --fingerprint-modelo modelos/wknn_lte_spatial.json
-
-# continuous: mede pra sempre a cada --interval segundos, logando cada estimativa num SQLite próprio, até Ctrl+C
-python -m estimador.live continuous --metodos cell_id,fingerprint --interval 5 \
-    --fn990-port /dev/ttyUSB2 --technology 5G --registry estimador/network_registry.json \
-    --fingerprint-modelo modelos/wknn_lte_spatial.json --db estimador_estimativas.db
-
-# --gnss-real lat,lon (opcional, os 2 modos aceitam): informa a posição real conhecida na hora,
-# pra já calcular e salvar o erro -- sem isso, usa o GNSS do próprio modem quando disponível
-
-# depois de medir em vários pontos/sessões, compare os métodos entre si:
-python -m estimador.relatorio --db estimador_estimativas.db --out resultados_live.csv
+# resumo do que foi medido ao vivo
+python -m estimador.evaluate live --db estimador_estimativas.db
 ```
 
 O treino do WKNN exige grupos suficientes no protocolo escolhido (pelo menos 3 pontos de
@@ -300,15 +284,15 @@ faltam; não há divisão aleatória por linha.
 | `PermissionError` ao abrir `/dev/ttyUSBx` | Usuário não está no grupo `dialout` | `sudo usermod -aG dialout $USER` e fazer logout/login |
 | `ConnectionError: ... não respondeu OK a 'AT'` | Porta errada ou modem desligado | Confirme a porta com `ls /dev/ttyUSB*` e `python -m hal.cli --port ... alive` |
 | `erro: ... banco do Coletor no formato v1` | O `--db` aponta para um banco antigo | Use `python -m coletor.migrate inspect/migrate` para gerar uma cópia v2, ou um arquivo novo |
-| `erro: ... está no schema v2 do Coletor` ao rodar `estimador.compare/infer` | Essas ferramentas legadas só leem bancos v1 (serão consolidadas em `estimador.evaluate`) | Use um radiomapa v1 antigo com elas |
-| `erro: schema_v1: ...` ao rodar `estimador.train` | O treino lê só o schema v2 | Gere uma cópia v2 com `python -m coletor.migrate migrate` (as linhas migradas ficam fora do treino) |
+| `erro: schema_v1: ...` ao rodar `estimador.train`/`evaluate` | O Estimador lê só o schema v2 | Gere uma cópia v2 com `python -m coletor.migrate migrate` (as linhas migradas ambíguas ficam fora) |
+| `erro: test_samples_missing`/`test_samples_changed` no `evaluate compare` | O banco não é o do treino ou mudou depois dele (inclusive novas sessões num ponto sem coordenada cadastrada) | Use o mesmo radiomapa do treino, ou treine de novo |
 | Resposta vem sempre `ERROR` ou vazia | Porta serial errada (não é a porta AT) | Teste outras portas `ttyUSBx` até achar a que responde `OK` a `AT` |
 | `sqlite3.OperationalError: database is locked` | Duas instâncias do Coletor abertas ao mesmo tempo sobre o mesmo `.db` | Rode só 1 instância do Coletor por banco |
-| `estimador.train`/`infer`/`compare`/`live` dá erro de subcomando | Esqueceu o subcomando logo após o nome do módulo | Ex.: `python -m estimador.infer cell_id --db ...` (subcomando vem antes das flags) |
-| Poucos pontos no radiomapa | O Fingerprint exige 10+ pontos; os outros 4 métodos não usam radiomapa | Rode mais sessões de coleta antes de treinar o Fingerprint |
+| `estimador.evaluate`/`live` dá erro de subcomando | Esqueceu o subcomando logo após o nome do módulo | Ex.: `python -m estimador.evaluate compare --db ...` (subcomando vem antes das flags) |
+| `insufficient_groups` ao treinar | Poucos pontos de referência (spatial) ou sessões (temporal) com referência posicional | Colete mais pontos/sessões antes de treinar o WKNN |
 | `invalid_registry` ao usar `cell_id`/`ta` | Cadastro ausente, no formato antigo (chave por PCI) ou com campo inválido | Copie `estimador/network_registry.example.json` e preencha por `global_cell_key`; a mensagem indica a entrada e o campo |
 | `Sem fix GNSS ainda` | GNSS ainda não conseguiu um *fix* (TTFF) | Aguarde alguns minutos em ambiente aberto (ver `planejamento/guia_comandos_modem.md`, Seção 8) |
-| `estimador.infer aoa`/`live ... aoa` reclama de "retas paralelas" | Os 2 bearings passados são iguais/opostos na mesma reta | Confirme que os 2 ângulos vêm de âncoras/relatórios LPP diferentes |
+| `live ... aoa` reclama de "retas paralelas" | Os 2 bearings passados são iguais/opostos na mesma reta | Confirme que os 2 ângulos vêm de âncoras/relatórios LPP diferentes |
 
 ---
 

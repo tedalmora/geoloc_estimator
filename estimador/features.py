@@ -13,13 +13,9 @@ A mesma radio_key repetida numa leitura vira a média dos RSRP.
 O vocabulário (ordem das colunas) é montado só com amostras de treino. Uma radio_key que
 apareça no treino com PLMN conhecido de outra operadora fica fora do vocabulário, mesmo nos
 registros curtos. Timing Advance não faz parte das features.
-
-Abaixo da nova API ficam, temporariamente, as funções do Estimador legado (v1, por PCI), ainda
-lidas por compare.py e infer.py até a consolidação da fase 5.
 """
 import math
 import re
-import sqlite3
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -193,45 +189,3 @@ def apply_scaling(vector: Sequence[float], scaling: Optional[dict]) -> List[floa
     if scaling is None:
         return list(vector)
     return [(v - m) / s for v, m, s in zip(vector, scaling["means"], scaling["stds"])]
-
-
-# ---------------------------------------------------------------- legado (v1, por PCI)
-FLOOR_RSRP_DBM = -140.0
-
-
-def open_legacy_radiomap(db_path: str) -> sqlite3.Connection:
-    """Abre o radiomapa do Coletor para o Estimador legado: somente leitura e só no schema v1.
-
-    O Coletor grava o schema v2 desde a fase 4 da reconfiguração; o Estimador passa a ler o v2
-    na fase 5. Até lá, um banco v2 é recusado com mensagem clara, sem nenhuma alteração.
-    """
-    from coletor.db import open_read_only, schema_info
-
-    try:
-        conn = open_read_only(db_path)
-    except FileNotFoundError as exc:
-        raise SystemExit(f"erro: {exc}") from exc
-    version, _ = schema_info(conn)
-    if version != 0:
-        conn.close()
-        raise SystemExit(
-            f"erro: {db_path} está no schema v{version} do Coletor. O Estimador legado (train/compare/infer) "
-            "só lê o schema v1; a leitura do schema v2 entra na fase 5 da reconfiguração."
-        )
-    return conn
-
-
-def build_feature_vector(measurement_row: dict, neighbors: List[dict], vocabulary: List[int]) -> List[float]:
-    """1 leitura (measurement + suas neighbor_cells) -> vetor de tamanho fixo len(vocabulary) + 1.
-
-    IMPORTANTE: esta é a ÚNICA função que monta o vetor de features -- tanto o treino
-    (build_training_table) quanto a inferência (estimador/infer.py) passam por aqui, para
-    nunca correrem o risco de gerar vetores com tamanho/ordem diferentes entre si.
-    O timing_advance vai sempre na última posição, depois das colunas de PCI.
-    """
-    rsrp_by_pci: Dict[int, float] = {n["pci"]: n["rsrp_dbm"] for n in neighbors}
-    if measurement_row.get("serving_pci") is not None:
-        rsrp_by_pci[measurement_row["serving_pci"]] = measurement_row["rsrp_dbm"]
-    vector = [rsrp_by_pci.get(pci, FLOOR_RSRP_DBM) for pci in vocabulary]
-    vector.append(measurement_row.get("timing_advance") or 0)
-    return vector

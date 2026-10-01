@@ -1,156 +1,113 @@
-# Estimador — o "cérebro" central de geolocalização
+# Estimador
 
-O Estimador reúne os **5 métodos de geolocalização** do projeto. **Só o Fingerprint usa
-aprendizado de máquina** — os outros 4 (`cell_id`, `ta`, `ecid_rede`, `aoa`) são cálculo
-direto, possível porque você tem controle total do core e vai saber a posição real de cada
-célula (`network_registry.json`). Ele tem 2 modos de operação bem separados:
+Estima a posição do UE a partir das leituras do modem. Desde a fase 5 da reconfiguração, o
+Estimador principal tem dois métodos, ambos em Python puro (só a biblioteca padrão; o runtime
+continua precisando apenas do `pyserial`):
 
-- **Offline (treino/validação)** -- `train.py` e `compare.py` leem o radiomapa que o
-  [Coletor](../coletor/README.md) gravou. Só existe porque o Fingerprint precisa de dados
-  históricos para aprender.
-- **Online (medição ao vivo)** -- `live.py` fala com o HAL **diretamente**, sem depender do
-  Coletor rodando, e responde "onde estou agora" com o(s) método(s) que você escolher.
+- **Cell-ID** (`methods/cell_id.py`): baseline. Devolve a posição **cadastrada da célula
+  servidora**, identificada pela `global_cell_key`. Não é E-CID e não é a posição do UE.
+- **Fingerprinting WKNN** (`methods/fingerprint.py`): RSRP das células do `#CSURV` por
+  `radio_key`, treinado offline com o radiomapa v2 do [Coletor](../coletor/README.md).
+
+TA, AoA/LPP e geometria angular (`methods/network_position.py`, `methods/aoa.py`) continuam
+legados e são revistos na fase 7. Os scripts antigos `compare.py`, `infer.py` e `relatorio.py`
+foram para [`../deprecated/`](../deprecated/README.md); o Random Forest foi removido.
 
 ```
 estimador/
-    features.py           # vocabulário fixo de PCIs (usado só pelo fingerprint.py)
-    evaluate.py            # métricas (haversine, CDF, percentil 90) -- compartilhadas por todo mundo
-    db.py                  # SQLite próprio p/ log das estimativas do modo `live.py continuous`
-    train.py               # OFFLINE -- treina o Fingerprint com o radiomapa do Coletor
-    compare.py             # OFFLINE -- compara os métodos no mesmo conjunto de teste
-    live.py                # ONLINE -- mede a posição agora, fala com o HAL direto
-    network_registry.example.json   # cadastro de posição/azimute das células -- copie e preencha
+    dataset.py     # radiomapa v2 (só leitura) -> amostras rotuladas; exclusões; divisão por grupos
+    geometry.py    # haversine, WGS-84 <-> ECEF <-> ENU
+    features.py    # política de células, vocabulário por radio_key, ausência, escala
+    estimate.py    # PositionEstimate (método, estado, motivo, lat/lon)
+    train.py       # OFFLINE: seleção e treino do WKNN; grava o bundle JSON
+    evaluate.py    # métricas e os subcomandos compare, cell-id e live
+    live.py        # ONLINE: mede agora, falando com o modem (não precisa do Coletor)
+    db.py          # SQLite próprio das estimativas do live.py (position_estimates)
+    network_registry.example.json   # modelo do cadastro de células
     methods/
-        cell_id.py             # Método: Cell-ID por global_cell_key + validação do cadastro (baseline)
-        network_position.py  # Métodos: Cell-ID/E-CID, E-CID de rede, Cell-ID+TA (sem ML)
-        fingerprint.py         # Método: Fingerprinting WKNN (Python puro, bundle JSON) -- ÚNICO com treino
-        aoa.py                 # Método: DL-AoD/UL-AoA (geometria pura, sem ML)
+        cell_id.py           # Cell-ID + validação do cadastro
+        fingerprint.py       # runtime WKNN; validação, leitura e gravação do bundle
+        network_position.py  # TA legado (fase 7)
+        aoa.py               # AoA legado (fase 7)
 ```
 
-## Tabela: os 5 métodos, o que cada um usa, e se precisa de ML
+## Dados de entrada (`dataset.py`)
 
-| Método | Onde mora | Usa ML? | Entrada | Precisa do radiomapa do Coletor? |
-|---|---|---|---|---|
-| `cell_id` (Cell-ID/E-CID, lado do UE) | `methods/network_position.py` | **Não** -- lookup no cadastro | `serving_pci` (do HAL) | Não |
-| `ecid_rede` (E-CID de rede) | `methods/network_position.py` (mesma função `estimate_cell_position`) | **Não** | `serving_pci`/cell id (do **core** -- integração ainda não implementada, ver nota abaixo) | Não |
-| `ta` (Cell-ID + Timing Advance) | `methods/network_position.py` | **Não** -- geometria/regra de 3 sobre o cadastro | `serving_pci` + `timing_advance` (do HAL) | Não |
-| `fingerprint` | `methods/fingerprint.py` | **Sim** -- WKNN | RSRP das células do #CSURV por `radio_key` | **Sim, é o único** |
-| `aoa` (DL-AoD/UL-AoA) | `methods/aoa.py` | **Não** -- interseção geométrica de 2 retas | 2 ângulos (bearings) de 2 âncoras conhecidas | Não |
+- Lê só o schema v2, em modo somente leitura; o v1 é recusado (`schema_v1`) com a instrução de
+  migração (`python -m coletor.migrate`).
+- Ficam fora: linhas migradas ambíguas (`legacy_ambiguous`), snapshot inválido, `#CSURV`
+  indisponível ou vazio e amostras sem referência posicional. MONI e SERVINFO não entram nas
+  features.
+- Referência posicional, nesta ordem: coordenada cadastrada do ponto; mediana GNSS do ponto
+  (mínimo de 3 leituras, com a dispersão registrada); GNSS isolado só com `--allow-single-gnss`.
 
-Isso cobre os métodos realmente viáveis com a topologia de até 2 antenas do projeto (ver
-`planejamento/visao_geral_projeto.md`, Seção 5.1) — os métodos que exigem 3+ pontos de rede
-(OTDOA, UL-TDOA, Multi-RTT) ficam fora de escopo por limitação física de infraestrutura, não
-por limitação deste código.
+## Protocolos de validação
 
-**Por que `cell_id` e `ecid_rede` não têm cada um seu próprio arquivo:** são o mesmo cálculo
-(`estimate_cell_position()`) -- a única diferença é de onde vem o `serving_pci` (HAL vs. core).
-**`ecid_rede` ainda não tem um subcomando de CLI próprio** porque não existe, hoje, nenhuma
-integração com o core que forneça esse dado -- quando existir, é só alimentar a mesma função
-com o dado vindo de lá, nenhuma conta nova precisa ser escrita.
+| Protocolo | Grupo | Mede | Grupos de teste |
+|---|---|---|---|
+| `spatial` | `reference_point_id` | generalização para pontos não vistos | fração dos pontos, sorteada com semente |
+| `temporal` | `session_id` | estabilidade no tempo nos mesmos pontos | sessões mais recentes |
 
-**Por que `ta` não usa mais KNN:** antes, sem saber a posição da torre, "célula + TA" só podia
-virar posição aprendendo empiricamente do radiomapa (daí o KNN). Agora que você vai cadastrar a
-posição real de cada célula, isso virou regra determinística: distância = TA × constante,
-projetada a partir da posição cadastrada (na direção do azimute, se você souber; senão, a
-posição fica igual à do Cell-ID puro e o TA só define um raio de incerteza). Ver
-`methods/network_position.py` para a implementação e os comentários com a fórmula.
+Nenhuma divisão é por linha. O teste é reservado antes da seleção; k, distância (L1/L2),
+escala (RSRP bruto ou padronizado) e política de ausência são escolhidos só por validação
+cruzada agrupada nos demais grupos, e o teste é avaliado uma única vez. Sem grupos
+suficientes, o treino encerra com `<protocolo>_validation_unavailable: insufficient_groups`.
+Os protocolos não são equivalentes: compare resultados só dentro do mesmo protocolo.
 
-**Situação atual do `ta` (importante):** o modem em uso hoje (`FN990A28`, firmware
-`M0R.000003`) não expõe Timing Advance em nenhum comando AT simples -- o HAL não lê TA e a
-leitura entregue ao Estimador sempre traz `timing_advance=None`, então **`ta` se comporta exatamente igual ao `cell_id`
-puro** por enquanto (distância = 0). Existe um comando dedicado (`AT#TAINFO`) só numa versão
-de firmware mais nova -- ver `planejamento/procedimento_ta_sinr_fn990.md` para a investigação
-completa e a avaliação de risco do upgrade. Não é bloqueante: o projeto já é válido com os
-outros 4 métodos, e `ta` volta a fazer sentido assim que o TA estiver disponível.
+## Bundle WKNN
 
-## O cadastro de células (`network_registry.json`)
+JSON com `model_type = "wknn"` e `model_version = 2`. Campos obrigatórios em `REQUIRED_FIELDS`
+e regras em `validate_bundle()` (`methods/fingerprint.py`): vocabulário de `radio_key`, status
+de PLMN por chave, valor de ausência (negativo e abaixo do menor RSRP do treino; nunca 0 dBm),
+escala, origem ENU, k, distância, política de distância zero, políticas de células e de
+referência, protocolo, grupos de treino, identificação do teste (`dataset.test_measurement_ids`
+e `dataset.test_samples_sha256`) e métricas de validação e de teste. Bundles `.joblib`/pickle
+são recusados sem serem abertos, e um bundle existente nunca é sobrescrito.
 
-Copie `network_registry.example.json` para `network_registry.json` e preencha 1 entrada por
-célula, identificada pela `global_cell_key` (`RAT:PLMN:CELL_ID`, a mesma que o Coletor grava em
-`measurements.serving_global_cell_key`), nunca pelo PCI. Formato e regras de validação: docstring
-de `methods/cell_id.py`. Cadastro inválido não é usado: o Cell-ID responde `invalid_registry`.
+## Cadastro de células (`network_registry.json`)
 
-## OFFLINE -- treino e comparação (dependem do Coletor)
+Copie `network_registry.example.json` (entradas fictícias, PLMN 00101) e preencha 1 entrada
+por célula, identificada pela `global_cell_key` (`RAT:PLMN:CELL_ID`, a mesma que o Coletor
+grava em `measurements.serving_global_cell_key`), nunca pelo PCI. Formato e regras: docstring
+de `methods/cell_id.py`. Estados do Cell-ID: `valid`, `unknown_cell`,
+`missing_global_cell_key`, `invalid_registry` e `unavailable`.
+
+## Comandos (a partir de `codigo/`)
 
 ```bash
-# Treinar o WKNN (banco v2; protocolo spatial = grupo por ponto, temporal = grupo por sessão)
-python -m estimador.train --db radiomapa_v2.db --technology LTE --protocol spatial --out modelos/wknn_lte_spatial.json
+# treino: um bundle por tecnologia e protocolo
+python -m estimador.train --db radiomapa_v2.db --technology LTE --protocol spatial \
+    --out modelos/wknn_lte_spatial.json --report modelos/wknn_lte_spatial_relatorio.json
+python -m estimador.train --db radiomapa_v2.db --technology LTE --protocol temporal \
+    --out modelos/wknn_lte_temporal.json
 
-# LEGADO (banco v1): cell_id/ta por PCI num sorteio de 20% das medições
-python -m estimador.compare --db radiomapa.db --technology 5G --registry network_registry.json --out resultados_5g.csv
+# WKNN e Cell-ID nas mesmas amostras de teste registradas no bundle
+python -m estimador.evaluate compare --db radiomapa_v2.db --model modelos/wknn_lte_spatial.json \
+    --registry estimador/network_registry.json --out resumo_spatial.csv --predictions-out estimativas_spatial.csv
+
+# validar o cadastro contra todas as amostras rotuladas (erro por célula servidora)
+python -m estimador.evaluate cell-id --db radiomapa_v2.db --registry estimador/network_registry.json
+
+# medir agora (once: N leituras, 1 linha por método; continuous: até Ctrl+C) e resumir depois
+python -m estimador.live once --metodos cell_id,fingerprint --fn990-port /dev/ttyUSB2 \
+    --registry estimador/network_registry.json --fingerprint-modelo modelos/wknn_lte_spatial.json
+python -m estimador.evaluate live --db estimador_estimativas.db
 ```
 
-`compare.py` também serve para **validar o cadastro de posições**: se `cell_id`/`ta` derem erro
-muito maior que o esperado contra os pontos GNSS reais do radiomapa, é sinal de que a posição
-cadastrada daquela célula está errada.
+Opções do treino: `python -m estimador.train --help` (grade, PLMN da campanha, inclusão de
+outras operadoras, de PLMN não confirmado e de `CELL_FORBIDDEN`, semente e folds). O
+`compare` recusa o banco se as medições de teste do bundle sumiram ou mudaram
+(`test_samples_missing`, `test_samples_changed`). Métricas: cobertura, média, mediana (CE50),
+RMSE, p90, p95, máximo e CDF.
 
-## ONLINE -- medir a posição agora (`live.py`, não depende do Coletor)
+## `live.py`
 
-```bash
-# once: tira 10 leituras (padrão), reporta média + desvio-padrão por método (métrica de Estabilidade)
-# e SALVA 1 linha por método em --db (padrão: estimador_estimativas.db)
-python -m estimador.live once --metodos cell_id,ta,fingerprint \
-    --fn990-port /dev/ttyUSB2 --technology 5G --registry network_registry.json \
-    --fingerprint-modelo modelos/wknn_lte_spatial.json
+Mede a posição agora, sem depender do Coletor: lê o modem pela aquisição compartilhada
+(`acquisition/snapshot.py`) e usa o mesmo `HealthMonitor`, com conexão própria (não rode os
+dois sobre o mesmo modem ao mesmo tempo). `--gnss-real lat,lon` informa a posição verdadeira
+para gravar o erro. `ta` e `aoa` continuam legados: o modem atual não expõe TA e os ângulos
+do AoA são digitados. A operação do `live.py` é revista na fase 6.
 
-# se você sabe a posição real na hora (ex.: parado num ponto já surveyado), informe com
-# --gnss-real -- o erro (haversine) já é calculado e salvo junto, sem precisar do GNSS do modem
-python -m estimador.live once --metodos cell_id,ta,fingerprint --gnss-real -26.9005,-49.0703 \
-    --fn990-port /dev/ttyUSB2 --technology 5G --registry network_registry.json \
-    --fingerprint-modelo modelos/wknn_lte_spatial.json
-
-# continuous: mede para sempre a cada --interval segundos, logando cada estimativa, até Ctrl+C
-python -m estimador.live continuous --metodos cell_id,fingerprint --interval 5 \
-    --fn990-port /dev/ttyUSB2 --technology 5G --registry network_registry.json \
-    --fingerprint-modelo modelos/wknn_lte_spatial.json --db estimador_estimativas.db
-
-# aoa precisa dos 2 ângulos (ainda extraídos manualmente do LPP) -- ficam fixos durante a execução
-python -m estimador.live once --metodos aoa \
-    --aoa-anchor1 -26.900,-49.070 --aoa-bearing1 45 --aoa-anchor2 -26.901,-49.071 --aoa-bearing2 300 \
-    --fn990-port /dev/ttyUSB2
-```
-
-`live.py` usa o mesmo `HealthMonitor` que o Coletor (`hal/health.py`) no modo `continuous`, e
-lê o modem pela aquisição compartilhada (`acquisition.snapshot.take_snapshot`, a mesma do
-Coletor). Mas gerencia sua **própria** conexão com o modem e não precisa do Coletor rodando.
-
-## Comparar depois do que foi medido ao vivo (`estimador/relatorio.py`)
-
-Toda vez que você roda `live.py` (`once` ou `continuous`), cada estimativa é salva em
-`position_estimates` -- com `lat_real`/`lon_real`/`erro_m` preenchidos sempre que havia uma
-posição real conhecida na hora (GNSS do modem ou `--gnss-real`). Depois de medir em vários
-pontos/sessões diferentes, compare todos os métodos de uma vez:
-
-```bash
-python -m estimador.relatorio --db estimador_estimativas.db --out resultados_live.csv
-```
-
-Isso é diferente do `compare.py` (que usa o radiomapa histórico do Coletor com split
-treino/teste) -- aqui a comparação é feita com o que você **mediu de verdade em campo**, sem
-precisar do Coletor rodando.
-
-## Avaliação e comparação entre métodos
-
-`evaluate.py` calcula erro haversine, CDF e percentil 90 (mesma definição de
-`planejamento/visao_geral_projeto.md`, Seção 7). O WKNN é avaliado por `estimador.train` no
-conjunto de teste agrupado; `compare.py` (legado) só cobre `cell_id` e `ta` por PCI. `aoa`, por não usar
-radiomapa, deve ser avaliado à parte: colete alguns pontos com GNSS conhecido, rode
-`estimador.live once --metodos aoa`, e calcule o erro manualmente com
-`estimador.evaluate.haversine_m(lat_real, lon_real, lat_estimado, lon_estimado)`.
-
-## Coleta vs. medição ao vivo -- por que não é a mesma coisa
-
-- **Coletor** = pipeline de **treino**: junta histórico com GNSS conhecido, só para o
-  Fingerprint aprender. Roda em campanhas de campo, ocasionalmente.
-- **`estimador/live.py`** = pipeline de **inferência**: responde "onde estou agora", com
-  qualquer um dos 5 métodos. Roda quando você quer usar o sistema de verdade.
-
-Os dois leem o modem pela mesma aquisição compartilhada (`acquisition/snapshot.py`) e usam o
-mesmo `HealthMonitor`. Mas são processos independentes, com propósitos diferentes, e você
-normalmente não roda os dois ao mesmo tempo sobre o mesmo modem.
-
-## Documento de referência
-
-Ver `planejamento/arquitetura_estimadores_posicao.md` e `planejamento/knn_explicado.md` (esse
-último é o tutorial conceitual de KNN/WKNN — este README é o mapa de "o que faz o quê").
+Referências conceituais: `planejamento/arquitetura_estimadores_posicao.md` e
+`planejamento/knn_explicado.md`.
 

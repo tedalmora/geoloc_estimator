@@ -375,26 +375,12 @@ def test_cli_inspect_imprime_json(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["contagens"]["sessions"] == 2
 
 
-# --------------------------------------------------------------------------- Estimador legado
-def test_estimador_legado_recusa_banco_v2(tmp_path):
-    from estimador.features import open_legacy_radiomap
-
-    banco = str(tmp_path / "v2.db")
-    cdb.connect(banco).close()
-    with pytest.raises(SystemExit, match="fase 5"):
-        open_legacy_radiomap(banco)
-
-
-def test_estimador_legado_le_v1_somente_leitura_e_nao_cria_arquivo(tmp_path):
-    from estimador.features import open_legacy_radiomap
+# --------------------------------------------------------------------------- Estimador x banco v1
+def test_estimador_recusa_banco_v1_sem_alterar(tmp_path):
+    from estimador.dataset import DatasetError, load_dataset
 
     v1 = banco_v1(tmp_path / "v1.db")
     antes = sha(v1)
-    conn = open_legacy_radiomap(v1)
-    with pytest.raises(sqlite3.OperationalError):
-        conn.execute("DELETE FROM sessions")
-    conn.close()
+    with pytest.raises(DatasetError, match="schema_v1: .*coletor.migrate"):
+        load_dataset(v1)
     assert sha(v1) == antes
-    with pytest.raises(SystemExit):
-        open_legacy_radiomap(str(tmp_path / "nao_existe.db"))
-    assert not (tmp_path / "nao_existe.db").exists()

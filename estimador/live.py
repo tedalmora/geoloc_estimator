@@ -3,8 +3,7 @@ estimar a posição AGORA, com 1 ou mais métodos ao mesmo tempo. Lê o modem pe
 compartilhada (`acquisition.snapshot.take_snapshot`, a mesma usada pelo Coletor) e usa o
 `HealthMonitor` (hal/health.py) para decidir reconexões. Cell-ID busca a global_cell_key da
 servidora no cadastro validado (methods/cell_id.py); fingerprint usa o bundle WKNN em JSON; TA e
-AoA continuam legados até a fase 7. Ver
-estimador/README.md, seção "Coleta vs. medição ao vivo", para a divisão de responsabilidades.
+AoA continuam legados até a fase 7. Ver estimador/README.md, seção "`live.py`".
 
 2 modos:
     once       -> tira N leituras (padrão 10), calcula a posição em cada uma por método
@@ -15,7 +14,7 @@ estimador/README.md, seção "Coleta vs. medição ao vivo", para a divisão de 
 
 Em ambos os modos, se houver uma posição real conhecida na hora (GNSS do próprio modem, ou
 `--gnss-real lat,lon` informado na mão), o erro (haversine) já é calculado e salvo junto --
-é isso que `estimador/relatorio.py` lê depois para comparar os métodos entre si.
+é isso que `python -m estimador.evaluate live` lê depois para comparar os métodos entre si.
 
 Uso (rodar a partir da pasta `codigo/`):
     python -m estimador.live once       --metodos cell_id,ta,fingerprint --fn990-port /dev/ttyUSB2 --technology 5G
@@ -30,7 +29,7 @@ Uso (rodar a partir da pasta `codigo/`):
         --aoa-anchor1 -26.900,-49.070 --aoa-bearing1 45 --aoa-anchor2 -26.901,-49.071 --aoa-bearing2 300 \
         --fn990-port /dev/ttyUSB2
 
-Depois de medir em vários pontos/sessões: `python -m estimador.relatorio --db estimador_estimativas.db`.
+Depois de medir em vários pontos/sessões: `python -m estimador.evaluate live --db estimador_estimativas.db`.
 """
 import argparse
 import signal

@@ -1,21 +1,11 @@
-"""Métodos: Cell-ID/E-CID (lado do UE ou da rede) e Cell-ID + Timing Advance.
+"""Cell-ID + Timing Advance (LEGADO, revisto na fase 7). O Cell-ID principal está em methods/cell_id.py.
 
-Unificados neste único arquivo porque são, no fundo, o MESMO cálculo: procurar a posição já
-CADASTRADA da célula servidora (`estimate_cell_position`), e opcionalmente refinar com o
-Timing Advance (`estimate_cell_position_ta`). Nenhuma função aqui usa aprendizado de máquina
--- o único método do projeto que usa ML é o Fingerprint (methods/fingerprint.py).
-
-Isso só é possível porque o cadastro (`network_registry.json`) traz a posição real de cada
-célula (você vai instalar/posicionar as antenas) -- sem isso, TA sozinho só dá um RAIO em
-torno da torre, não um PONTO (por isso, sem controle da rede, isso teria que ser aprendido
-empiricamente do radiomapa -- ver planejamento/arquitetura_estimadores_posicao.md).
-
-**Cell-ID/E-CID (lado do UE) e E-CID de rede usam a MESMA função `estimate_cell_position()`**
--- a única diferença entre os dois é de onde vem o `serving_pci`: do HAL (AT, lado do UE, via
-`get_serving_cell()`) ou do core (lado da rede -- integração ainda não implementada; é só
-trocar a fonte do `serving_pci` quando isso existir). Ver estimador/README.md.
+A distância do TA é projetada a partir da posição cadastrada da célula servidora (na direção do
+azimute do setor, se conhecido; senão o TA só define um raio de incerteza). O modem atual não
+expõe TA (o `live.py` passa sempre None), então hoje o resultado coincide com o Cell-ID.
+`live.py` monta o dicionário {global_cell_key: CellPosition} a partir do cadastro validado.
+A constante por RAT e o modelo geométrico são pendências da fase 7 (auditoria T01-T03).
 """
-import json
 import math
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
@@ -34,33 +24,6 @@ class CellPosition:
     azimute_graus: Optional[float] = None  # None = célula omnidirecional ou azimute ainda desconhecido
 
 
-def load_registry(path: str) -> Dict[int, CellPosition]:
-    """Lê o cadastro de posições conhecidas (JSON) -- 1 entrada por PCI/cell id.
-    Ver network_registry.example.json para o formato e instruções de preenchimento.
-    """
-    with open(path, encoding="utf-8") as f:
-        raw = json.load(f)
-    registry: Dict[int, CellPosition] = {}
-    for pci, valores in raw.items():
-        if pci.startswith("_"):
-            continue  # chaves começando com "_" são comentários/instruções, não células
-        registry[int(pci)] = CellPosition(
-            lat=valores["lat"], lon=valores["lon"], azimute_graus=valores.get("azimute_graus")
-        )
-    return registry
-
-
-def estimate_cell_position(
-    serving_pci: Optional[int], registry: Dict[int, CellPosition]
-) -> Optional[Tuple[float, float]]:
-    """Método: Cell-ID/E-CID. Usado tanto para o lado do UE (serving_pci vindo do HAL) quanto
-    para o E-CID de rede (serving_pci vindo do core) -- mesma função, fonte de dado diferente."""
-    if serving_pci is None or serving_pci not in registry:
-        return None  # célula fora do cadastro -- sem estimativa possível
-    torre = registry[serving_pci]
-    return torre.lat, torre.lon
-
-
 def _projetar_ponto(lat: float, lon: float, azimute_graus: float, distancia_m: float) -> Tuple[float, float]:
     """Desloca (lat, lon) por `distancia_m` na direção `azimute_graus` (0=Norte, sentido horário).
     Aproximação de plano local -- válida para as distâncias curtas deste projeto (poucos km),
@@ -74,25 +37,22 @@ def _projetar_ponto(lat: float, lon: float, azimute_graus: float, distancia_m: f
 
 
 def estimate_cell_position_ta(
-    serving_pci: Optional[int],
+    serving_key,
     timing_advance: Optional[int],
     technology: str,
-    registry: Dict[int, CellPosition],
+    registry: Dict[object, CellPosition],
 ) -> Optional[dict]:
-    """Método: Cell-ID + Timing Advance -- SEM aprendizado de máquina.
+    """Cell-ID + Timing Advance -- SEM aprendizado de máquina. `serving_key` é a chave da
+    célula servidora no `registry` (global_cell_key no live.py).
 
     Usa a posição cadastrada da célula + a distância derivada do TA. Se o azimute do setor for
-    conhecido, desloca o ponto nessa direção (estimativa mais precisa que o Cell-ID puro). Se
-    não for conhecido (célula omnidirecional, ex. o QCell indoor, ou azimute ainda não
-    cadastrado), devolve a MESMA posição do Cell-ID puro -- nesse caso o TA não move o ponto,
-    só informa um raio de incerteza (o TA melhora o que você sabe sobre o erro, não a posição).
-
-    Devolve um dict (não só uma tupla) porque o raio de incerteza é informação relevante por
-    si só -- ver estimador/README.md.
+    conhecido, desloca o ponto nessa direção. Se não for conhecido (célula omnidirecional ou
+    azimute ainda não cadastrado), devolve a MESMA posição do Cell-ID -- nesse caso o TA não
+    move o ponto, só informa um raio de incerteza.
     """
-    if serving_pci is None or serving_pci not in registry:
+    if serving_key is None or serving_key not in registry:
         return None
-    torre = registry[serving_pci]
+    torre = registry[serving_key]
     distancia_m = (timing_advance or 0) * METROS_POR_TA.get(technology, 78.12)
     if torre.azimute_graus is not None:
         lat, lon = _projetar_ponto(torre.lat, torre.lon, torre.azimute_graus, distancia_m)

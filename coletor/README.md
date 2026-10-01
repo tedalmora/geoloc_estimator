@@ -101,7 +101,8 @@ identidade é inventada:
 
 ## Relação com o Estimador
 
-O Estimador legado (`train`, `compare`, `infer`) ainda lê só o schema v1 e recusa o v2 com
-mensagem clara (abre o banco somente leitura). A leitura do v2 entra na fase 5. O
-`estimador/live.py` não depende do Coletor: lê o modem pela mesma aquisição compartilhada.
+O Estimador (`estimador.train` e `estimador.evaluate`) lê o schema v2 em modo somente leitura e
+recusa o v1 (`schema_v1`). Entram só leituras com `#CSURV` válido e referência posicional; as
+linhas migradas ambíguas ficam fora (ver `estimador/README.md`). O `estimador/live.py` não
+depende do Coletor: lê o modem pela mesma aquisição compartilhada.
 

@@ -47,10 +47,10 @@ def test_B00_sintaxe_de_todos_os_modulos():
 
 MODULOS_AUDITORIA = [
     "hal.models", "hal.parsing", "hal.modem_driver", "hal.fn990_driver", "hal.health", "hal.cli",
-    "coletor.db", "coletor.daemon", "coletor.export_csv", "estimador.features", "estimador.evaluate",
-    "estimador.db", "estimador.methods.network_position", "estimador.methods.aoa",
-    "estimador.methods.fingerprint", "estimador.train", "estimador.compare", "estimador.infer",
-    "estimador.live", "estimador.relatorio",
+    "coletor.db", "coletor.daemon", "coletor.export_csv", "estimador.dataset", "estimador.geometry",
+    "estimador.estimate", "estimador.features", "estimador.evaluate", "estimador.db",
+    "estimador.methods.cell_id", "estimador.methods.network_position", "estimador.methods.aoa",
+    "estimador.methods.fingerprint", "estimador.train", "estimador.live",
 ]
 
 
