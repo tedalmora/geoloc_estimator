@@ -1,9 +1,7 @@
-"""Um módulo por método de geolocalização (cell_id, timing_advance, fingerprint, aoa).
+"""Um módulo por método de geolocalização.
 
-Cada um expõe funções `train_*`/`predict_*` (ou, no caso do aoa, uma função geométrica
-pura, sem treino) -- o dispatcher em estimador/train.py e estimador/infer.py chama a
-função certa conforme o `--metodo`/subcomando escolhido na linha de comando.
+cell_id.py: Cell-ID por global_cell_key (baseline). fingerprint.py: WKNN com bundle JSON.
+network_position.py (TA) e aoa.py: legados, revistos na fase 7.
 
-Ver o README desta pasta (estimador/README.md) para a tabela completa de qual método
-serve para qual tipo de geolocalização e o que cada um precisa como entrada.
+Ver o README desta pasta (estimador/README.md) para entradas, saídas e estados de cada método.
 """

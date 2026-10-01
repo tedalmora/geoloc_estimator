@@ -24,7 +24,7 @@ codigo/
         methods/
             cell_id.py            # Cell-ID por global_cell_key + validação do cadastro (baseline)
             network_position.py  # Cell-ID/E-CID, E-CID de rede, Cell-ID+TA -- sem ML, cadastro conhecido
-            fingerprint.py        # Fingerprinting completo (KNN/WKNN + Random Forest) -- Único com ML
+            fingerprint.py        # Fingerprinting WKNN (Python puro, bundle JSON) -- único com treino
             aoa.py                 # DL-AoD/UL-AoA (geometria pura, sem ML)
     requirements.txt      # runtime do alvo: só pyserial (HAL, aquisição, Coletor)
     requirements-dev.txt  # PC de desenvolvimento: pytest + dependências do Estimador legado (até a fase 5)
@@ -60,7 +60,7 @@ métodos viraram cálculo direto -- só o Fingerprint ainda usa aprendizado de m
 | Cell-ID / E-CID | Não | Não | `estimador.live` ou `estimador.infer cell_id` |
 | E-CID de rede | Não | Não | mesma função do Cell-ID -- só falta a integração com o core (ver `estimador/README.md`) |
 | Cell-ID + Timing Advance | Não | Não | `estimador.live` ou `estimador.infer ta` -- **hoje se comporta igual ao Cell-ID puro**: o TA não é exposto pelo firmware atual do modem, só com upgrade (ver `hal/README.md`) |
-| Fingerprinting | **Sim** | **Sim** -- único que precisa | `estimador.train` (offline) depois `estimador.live`/`infer fingerprint` |
+| Fingerprinting | **Sim** | **Sim** -- único que precisa | `estimador.train` (offline) depois `estimador.live` |
 | DL-AoD / UL-AoA | Não | Não | `estimador.live`/`infer aoa` -- mas o **ângulo** ainda precisa ser extraído manualmente do relatório LPP (ver `hal/README.md`) |
 
 ---
@@ -73,8 +73,8 @@ métodos viraram cálculo direto -- só o Fingerprint ainda usa aprendizado de m
 - Acesso root/sudo, ao menos na primeira configuração.
 
 **Nota Buildroot:** se você estiver usando a imagem Buildroot customizada do projeto (em vez do
-Raspberry Pi OS), instale as dependências como pacotes do `menuconfig` (`python3-pyserial`,
-`python3-pandas`, `python3-numpy`, `python3-scikit-learn`) em vez de usar `pip`. Se
+Raspberry Pi OS), instale `python3-pyserial` como pacote do `menuconfig` em vez de usar `pip`
+(é a única dependência de runtime). Se
 `python3-pyserial` não estiver disponível, existe um plano B sem `pyserial` descrito em
 `planejamento/arquitetura_hal.md`, Seção 1.
 
@@ -97,9 +97,8 @@ python3 -m venv venv
 source venv/bin/activate
 
 # 4. Instalar as dependências Python
-#    requirements.txt (só pyserial) basta para HAL, aquisição e Coletor.
-#    O Estimador legado (train/compare/infer/live) ainda usa pandas/numpy/scikit-learn/joblib,
-#    listados em requirements-dev.txt, até a fase 5 da reconfiguração.
+#    requirements.txt (só pyserial) basta para HAL, aquisição, Coletor e o Estimador ativo
+#    (train/live são Python puro). requirements-dev.txt é só para o PC (pytest e scripts legados).
 pip install -r requirements.txt
 
 # 5. Dar permissão de acesso à porta serial do modem (evita precisar rodar tudo como root)
@@ -258,13 +257,12 @@ Só o **Fingerprint** usa aprendizado de máquina -- os outros 4 (`cell_id`, `ta
 # Treinar o WKNN (banco v2; protocolo spatial = grupo por ponto, temporal = grupo por sessão)
 python -m estimador.train --db radiomapa_v2.db --technology LTE --protocol spatial --out modelos/wknn_lte_spatial.json
 
-# Comparar cell_id, ta, fingerprint (wknn e rf) no MESMO conjunto de teste -- tabela pronta p/ o Cap. 5
+# LEGADO (banco v1): cell_id/ta por PCI num sorteio de 20% das medições
 python -m estimador.compare --db radiomapa.db --technology 5G --registry estimador/network_registry.json --out resultados_5g.csv
 
-# Inferir a partir da última leitura já gravada no banco (útil para validar contra pontos com GNSS conhecido)
+# Inferir a partir da última leitura já gravada no banco (LEGADO, banco v1)
 python -m estimador.infer cell_id --db radiomapa.db --technology 5G --registry estimador/network_registry.json
 python -m estimador.infer ta      --db radiomapa.db --technology 5G --registry estimador/network_registry.json
-python -m estimador.infer fingerprint --db radiomapa.db --modelo modelos/fingerprint_5g.joblib --watch --interval 5
 python -m estimador.infer aoa --anchor1 -26.900,-49.070 --bearing1 45 --anchor2 -26.901,-49.071 --bearing2 300
 ```
 
@@ -309,7 +307,6 @@ faltam; não há divisão aleatória por linha.
 | `estimador.train`/`infer`/`compare`/`live` dá erro de subcomando | Esqueceu o subcomando logo após o nome do módulo | Ex.: `python -m estimador.infer cell_id --db ...` (subcomando vem antes das flags) |
 | Poucos pontos no radiomapa | O Fingerprint exige 10+ pontos; os outros 4 métodos não usam radiomapa | Rode mais sessões de coleta antes de treinar o Fingerprint |
 | `invalid_registry` ao usar `cell_id`/`ta` | Cadastro ausente, no formato antigo (chave por PCI) ou com campo inválido | Copie `estimador/network_registry.example.json` e preencha por `global_cell_key`; a mensagem indica a entrada e o campo |
-| `UserWarning: X does not have valid feature names` ao rodar `estimador.infer`/`live` | Aviso inofensivo do scikit-learn (compara nomes de coluna) | Pode ignorar -- não afeta o resultado |
 | `Sem fix GNSS ainda` | GNSS ainda não conseguiu um *fix* (TTFF) | Aguarde alguns minutos em ambiente aberto (ver `planejamento/guia_comandos_modem.md`, Seção 8) |
 | `estimador.infer aoa`/`live ... aoa` reclama de "retas paralelas" | Os 2 bearings passados são iguais/opostos na mesma reta | Confirme que os 2 ângulos vêm de âncoras/relatórios LPP diferentes |
 

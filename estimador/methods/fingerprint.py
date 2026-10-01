@@ -191,31 +191,3 @@ def save_bundle(bundle: dict, path: str) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(bundle, f, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     os.replace(tmp, path)
-
-
-# ---------------------------------------------------------------- legado (compare.py/infer.py até a fase 5)
-def train_fingerprint(X_train, y_train) -> dict:
-    from sklearn.ensemble import RandomForestRegressor
-    from sklearn.neighbors import KNeighborsRegressor
-    from sklearn.preprocessing import StandardScaler
-
-    # KNN/WKNN depende de distância numérica -- precisa normalizar (ver knn_explicado.md, Seção 8).
-    # Random Forest não precisa (compara limiares por feature, não distância entre elas).
-    scaler = StandardScaler()
-    X_train_norm = scaler.fit_transform(X_train)
-    wknn = KNeighborsRegressor(n_neighbors=5, weights="distance").fit(X_train_norm, y_train)
-    rf = RandomForestRegressor(n_estimators=200, random_state=42).fit(X_train, y_train)
-    return {"scaler": scaler, "wknn": wknn, "rf": rf}
-
-
-def predict_fingerprint(bundle: dict, measurement_row: dict, neighbors: List[dict], vocabulary: List[int],
-                        modelo: str = "wknn"):
-    from ..features import build_feature_vector
-
-    x = build_feature_vector(measurement_row, neighbors, vocabulary)
-    if modelo == "rf":
-        lat, lon = bundle["rf"].predict([x])[0]  # Random Forest usa o vetor cru, sem normalizar
-    else:
-        x_norm = bundle["scaler"].transform([x])
-        lat, lon = bundle["wknn"].predict(x_norm)[0]
-    return float(lat), float(lon)

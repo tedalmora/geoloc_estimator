@@ -23,7 +23,7 @@ estimador/
     methods/
         cell_id.py             # Método: Cell-ID por global_cell_key + validação do cadastro (baseline)
         network_position.py  # Métodos: Cell-ID/E-CID, E-CID de rede, Cell-ID+TA (sem ML)
-        fingerprint.py         # Método: Fingerprinting completo (KNN/WKNN + Random Forest) -- ÚNICO com ML
+        fingerprint.py         # Método: Fingerprinting WKNN (Python puro, bundle JSON) -- ÚNICO com treino
         aoa.py                 # Método: DL-AoD/UL-AoA (geometria pura, sem ML)
 ```
 
@@ -34,7 +34,7 @@ estimador/
 | `cell_id` (Cell-ID/E-CID, lado do UE) | `methods/network_position.py` | **Não** -- lookup no cadastro | `serving_pci` (do HAL) | Não |
 | `ecid_rede` (E-CID de rede) | `methods/network_position.py` (mesma função `estimate_cell_position`) | **Não** | `serving_pci`/cell id (do **core** -- integração ainda não implementada, ver nota abaixo) | Não |
 | `ta` (Cell-ID + Timing Advance) | `methods/network_position.py` | **Não** -- geometria/regra de 3 sobre o cadastro | `serving_pci` + `timing_advance` (do HAL) | Não |
-| `fingerprint` | `methods/fingerprint.py` | **Sim** -- KNN/WKNN + Random Forest | RSRP da servidora + de todas as vizinhas (do HAL) | **Sim, é o único** |
+| `fingerprint` | `methods/fingerprint.py` | **Sim** -- WKNN | RSRP das células do #CSURV por `radio_key` | **Sim, é o único** |
 | `aoa` (DL-AoD/UL-AoA) | `methods/aoa.py` | **Não** -- interseção geométrica de 2 retas | 2 ângulos (bearings) de 2 âncoras conhecidas | Não |
 
 Isso cobre os métodos realmente viáveis com a topologia de até 2 antenas do projeto (ver
@@ -76,7 +76,7 @@ de `methods/cell_id.py`. Cadastro inválido não é usado: o Cell-ID responde `i
 # Treinar o WKNN (banco v2; protocolo spatial = grupo por ponto, temporal = grupo por sessão)
 python -m estimador.train --db radiomapa_v2.db --technology LTE --protocol spatial --out modelos/wknn_lte_spatial.json
 
-# Comparar cell_id, ta, fingerprint (wknn e rf) no MESMO conjunto de teste -- tabela pronta p/ o Cap. 5
+# LEGADO (banco v1): cell_id/ta por PCI num sorteio de 20% das medições
 python -m estimador.compare --db radiomapa.db --technology 5G --registry network_registry.json --out resultados_5g.csv
 ```
 
@@ -132,8 +132,8 @@ precisar do Coletor rodando.
 ## Avaliação e comparação entre métodos
 
 `evaluate.py` calcula erro haversine, CDF e percentil 90 (mesma definição de
-`planejamento/visao_geral_projeto.md`, Seção 7). `compare.py` usa isso para `cell_id`, `ta` e
-`fingerprint` (wknn e rf) lado a lado, no mesmo conjunto de teste. `aoa`, por não usar
+`planejamento/visao_geral_projeto.md`, Seção 7). O WKNN é avaliado por `estimador.train` no
+conjunto de teste agrupado; `compare.py` (legado) só cobre `cell_id` e `ta` por PCI. `aoa`, por não usar
 radiomapa, deve ser avaliado à parte: colete alguns pontos com GNSS conhecido, rode
 `estimador.live once --metodos aoa`, e calcule o erro manualmente com
 `estimador.evaluate.haversine_m(lat_real, lon_real, lat_estimado, lon_estimado)`.

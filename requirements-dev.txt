@@ -2,9 +2,7 @@
 -r requirements.txt
 pytest>=8
 
-# Usadas apenas pelo Estimador legado (train/compare/infer/live baseados em PCI) até a fase 5 da
-# reconfiguração, quando o Estimador passa a ter runtime com dependências mínimas.
+# Usadas apenas pelos scripts legados do Estimador (compare.py/relatorio.py, banco v1) até a
+# consolidação da fase 5. O WKNN, o Cell-ID e o treino são Python puro.
 pandas>=2.0
 numpy>=1.24
-scikit-learn>=1.3
-joblib>=1.3
