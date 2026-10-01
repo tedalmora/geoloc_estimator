@@ -17,6 +17,8 @@ import pytest
 
 from support import BlockingSerial, SilentSerial, at_lines, driver_com
 
+from radiomapa_sintetico import criar_radiomapa
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
@@ -385,13 +387,16 @@ def tabela_legado():
     return X, y, vocab
 
 
-@pendente(5)
-def test_D01_mesmo_ponto_nao_aparece_em_treino_e_teste(tabela_legado):
-    from sklearn.model_selection import train_test_split
+def test_D01_mesmo_ponto_nao_aparece_em_treino_e_teste(tmp_path):
+    from estimador.dataset import load_dataset, make_group_split, samples_in_groups
 
-    X, y, _ = tabela_legado
-    _, _, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
-    assert not set(map(tuple, y_tr.values.round(6))) & set(map(tuple, y_te.values.round(6)))
+    banco = tmp_path / "d01.db"
+    criar_radiomapa(banco)
+    amostras = load_dataset(str(banco)).samples
+    split = make_group_split(amostras, "spatial")
+    teste = {s.reference_point_id for s in samples_in_groups(amostras, "spatial", split.test_groups)}
+    selecao = {s.reference_point_id for s in samples_in_groups(amostras, "spatial", split.selection_groups)}
+    assert teste and selecao and not teste & selecao
 
 
 @pendente(5)
