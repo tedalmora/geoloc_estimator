@@ -1,9 +1,5 @@
-"""Monitor de saúde de uma conexão com modem: acompanha falhas consecutivas e decide quando
-vale a pena tentar reconectar. Vive aqui (não em coletor/) porque "o modem ainda responde?"
-é uma pergunta sobre a CONEXÃO (assunto do HAL), não sobre coleta de dados -- por isso é
-reaproveitado tanto pelo Coletor (campanha de campo) quanto pelo estimador/live.py (posição
-ao vivo): os dois rodam como daemon, cada um com sua própria conexão, mas com a mesma lógica
-de "quantas falhas seguidas até tentar reconectar".
+"""Monitor de saúde da conexão com o modem: conta falhas seguidas e indica quando tentar
+reconectar. Usado pelo Coletor no modo contínuo; o live.py faz uma única leitura e não o usa.
 """
 from dataclasses import dataclass, field
 from typing import Dict

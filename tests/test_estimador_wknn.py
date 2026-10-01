@@ -4,13 +4,14 @@ import json
 import math
 import os
 import pickle
+import statistics
 
 import pytest
 
 from radiomapa_sintetico import CAMPAIGN_PLMN, CELULAS, LOCAL_KEY, criar_radiomapa, observacao
 
 import estimador.train as tr
-from estimador.dataset import CsurvCell, DatasetError, load_dataset, samples_in_groups
+from estimador.dataset import CsurvCell, DatasetError, load_dataset, make_group_split, samples_in_groups
 from estimador.features import (
     PLMN_CAMPAIGN,
     PLMN_UNCONFIRMED,
@@ -21,12 +22,15 @@ from estimador.features import (
     build_vocabulary,
     cells_from_observations,
     fit_scaling,
+    rsrp_by_key,
     vectorize,
 )
 from estimador.geometry import EnuFrame, haversine_m
 from estimador.methods.fingerprint import BundleError, WknnModel, load_bundle, save_bundle, validate_bundle, wknn_from_sorted
+from software_version import software_version
 
 POLITICA = CellFilterPolicy("LTE", CAMPAIGN_PLMN)
+SEMENTE_P6_NO_TESTE = 8  # com esta semente, o sorteio spatial põe P6 (único ponto que vê LOCAL_KEY) no teste
 
 
 def cel(key, plmn="72406", status="CELL_SUITABLE", rsrp=-100.0, rat=None):
@@ -127,10 +131,29 @@ def test_mesmo_vetor_no_treino_e_na_inferencia_e_moni_nao_entra():
 # --------------------------------------------------------------------------- WKNN
 def test_wknn_pesos_inversos_e_distancia_zero():
     xs, ys = [0.0, 10.0, 100.0], [0.0, 0.0, 0.0]
-    x, y, zero = wknn_from_sorted([(1.0, 0), (3.0, 1), (9.0, 2)], xs, ys, 2)
-    assert (round(x, 6), y, zero) == (2.5, 0.0, False)
-    x, y, zero = wknn_from_sorted([(0.0, 1), (0.0, 0), (2.0, 2)], xs, ys, 3)
-    assert (x, zero) == (5.0, True)  # média simples dos vizinhos exatos
+    x, y, zero, usados = wknn_from_sorted([(1.0, 0), (3.0, 1), (9.0, 2)], xs, ys, 2)
+    assert (round(x, 6), y, zero, usados) == (2.5, 0.0, False, [0, 1])
+    x, y, zero, usados = wknn_from_sorted([(0.0, 1), (0.0, 0), (2.0, 2)], xs, ys, 3)
+    assert (x, zero, usados) == (5.0, True, [1, 0])  # média simples dos vizinhos exatos
+
+
+def test_distancia_zero_usa_todas_as_amostras_exatas_mesmo_alem_de_k():
+    xs, ys = [0.0, 10.0, 100.0, 40.0], [0.0, 0.0, 0.0, 30.0]
+    x, y, zero, usados = wknn_from_sorted([(0.0, 0), (0.0, 1), (0.0, 3), (2.0, 2)], xs, ys, 2)
+    assert (x, y, zero, usados) == (pytest.approx(50 / 3), 10.0, True, [0, 1, 3])  # 3 exatas com k = 2, sem peso
+
+
+def test_empate_na_k_esima_distancia_fica_com_a_amostra_anterior_do_bundle(treino_spatial):
+    _, bundle, _ = treino_spatial
+    copia = json.loads(json.dumps(bundle))
+    fp = copia["fingerprints"]
+    fp["rsrp_dbm"][1] = list(fp["rsrp_dbm"][0])  # duas amostras iguais em posições diferentes
+    copia["n_neighbors"] = 1
+    consulta = list(fp["rsrp_dbm"][0])
+    consulta[0] += 0.001  # distância não nula e igual às duas
+    x, y, zero, vizinhos = WknnModel(copia).predict_xy(consulta)
+    assert not zero and vizinhos == [fp["measurement_id"][0]]
+    assert (x, y) == (pytest.approx(fp["x_m"][0]), pytest.approx(fp["y_m"][0]))
 
 
 # --------------------------------------------------------------------------- treino e bundle
@@ -152,6 +175,14 @@ def test_treino_spatial_gera_bundle_completo_e_valido(treino_spatial, radiomapa)
     teste = bundle["validation"]["test_metrics"]
     assert teste["n_total"] == len(bundle["dataset"]["test_measurement_ids"]) and teste["coverage"] == 1.0
     assert math.isfinite(teste["mean_m"]) and teste["mean_m"] < 150  # sanidade: dentro da área sintética
+    assert bundle["software_version"] == software_version()
+    assert bundle["training_groups"]["reference_point_ids"] == [1, 2, 3, 5, 6]  # P4 no teste
+    v = bundle["validation"]
+    assert v["subsets"]["test"] == {"groups": 1, "points": 1, "sessions": 3, "samples": 9}
+    assert v["subsets"]["selection"] == {"groups": 5, "points": 5, "sessions": 15, "samples": 45}
+    assert [f["train"]["groups"] for f in v["subsets"]["folds"]] == [4] * 5
+    assert teste["composition"] == {"new_points": 9} and v["test_reference"]["status"] == "final"
+    assert len(v["warnings"]) == 1 and "único grupo" in v["warnings"][0]
 
 
 def test_vocabulario_e_fingerprints_vem_so_dos_grupos_de_selecao(treino_spatial, radiomapa):
@@ -162,8 +193,56 @@ def test_vocabulario_e_fingerprints_vem_so_dos_grupos_de_selecao(treino_spatial,
     assert set(bundle["cell_keys"]) <= vistas
     teste = set(bundle["dataset"]["test_measurement_ids"])
     assert not teste & set(bundle["fingerprints"]["measurement_id"])
-    if 6 in bundle["validation"]["split"]["test_groups"]:
-        assert LOCAL_KEY not in bundle["cell_keys"]
+
+
+def test_radio_key_vista_so_no_ponto_de_teste_fica_fora_do_vocabulario(radiomapa, tmp_path):
+    bundle, _ = tr.train(radiomapa, "LTE", "spatial", str(tmp_path / "p6.json"), grid=tr.Grid(k=(1, 3)),
+                         seed=SEMENTE_P6_NO_TESTE)
+    assert bundle["validation"]["split"]["test_groups"] == [6]
+    teste = [s for s in load_dataset(radiomapa).samples if s.measurement_id in bundle["dataset"]["test_measurement_ids"]]
+    assert any(c.radio_key == LOCAL_KEY for s in teste for c in s.cells)
+    assert LOCAL_KEY not in bundle["cell_keys"]
+    estimativa = WknnModel(bundle).predict(next(s for s in teste if any(c.radio_key == LOCAL_KEY for c in s.cells)).cells)
+    assert estimativa.valid and estimativa.metadata["n_ignored_keys"] >= 1  # ignorada, sem mudar o bundle
+
+
+def test_cada_fold_ajusta_vocabulario_ausencia_e_escala_so_com_o_proprio_treino(radiomapa, monkeypatch):
+    amostras, _ = tr.eligible_samples(load_dataset(radiomapa).samples, "spatial", POLITICA)
+    split = make_group_split(amostras, "spatial")
+    selecao = samples_in_groups(amostras, "spatial", split.selection_groups)
+    ajustes, escalas = [], []
+    fit_features, fit_scaling = tr.fit_features, tr.fit_scaling
+
+    def espiao_features(samples, policy, missing):
+        ajustado = fit_features(samples, policy, missing)
+        ajustes.append(([s.measurement_id for s in samples], ajustado))
+        return ajustado
+
+    def espiao_escala(vetores, estrategia):
+        params = fit_scaling(vetores, estrategia)
+        escalas.append((len(vetores), params))
+        return params
+
+    monkeypatch.setattr(tr, "fit_features", espiao_features)
+    monkeypatch.setattr(tr, "fit_scaling", espiao_escala)
+    tr.select_candidate(selecao, split, POLITICA, tr.Grid(k=(1,), metrics=("L1",), scalings=("standardized",),
+                                                       missing=("floor_offset:10",)))
+    assert len(ajustes) == len(escalas) == len(split.folds) == 5
+    com_chave_so_na_validacao = 0
+    for (ids, ajustado), (linhas, params), (grupos_treino, grupos_validacao) in zip(ajustes, escalas, split.folds):
+        treino = samples_in_groups(selecao, "spatial", grupos_treino)
+        validacao = samples_in_groups(selecao, "spatial", grupos_validacao)
+        assert ids == [s.measurement_id for s in treino]
+        aceitas = [c for s in treino for c in s.cells if POLITICA.accepts(c)]
+        assert set(ajustado.cell_keys) <= {c.radio_key for c in aceitas}
+        rsrp_treino = [v for s in treino for k, v in rsrp_by_key(s.cells, POLITICA).items() if k in ajustado.cell_keys]
+        assert ajustado.missing_value == min(rsrp_treino) - 10
+        assert linhas == len(treino) == len(ajustado.raw)
+        medias = [statistics.fmean(v[j] for v in ajustado.raw) for j in range(len(ajustado.cell_keys))]
+        assert params["means"] == pytest.approx(medias)
+        chaves_validacao = {c.radio_key for s in validacao for c in s.cells if POLITICA.accepts(c)}
+        com_chave_so_na_validacao += bool(chaves_validacao - set(ajustado.cell_keys))
+    assert com_chave_so_na_validacao >= 1  # o fold que valida em P6 não conhece LOCAL_KEY
 
 
 def test_inferencia_pelo_bundle_salvo(treino_spatial, radiomapa):
@@ -174,7 +253,7 @@ def test_inferencia_pelo_bundle_salvo(treino_spatial, radiomapa):
     assert estimativa.valid and math.isfinite(estimativa.lat) and math.isfinite(estimativa.lon)
     assert (estimativa.lat, estimativa.lon) == pytest.approx(modelo.frame.to_geodetic(estimativa.x_m, estimativa.y_m)[:2])
     assert modelo.predict([cel("NR:629952:123", rat="NR")]).status == "technology_mismatch"
-    assert modelo.predict([cel("LTE:9999:1")]).status == "unavailable"
+    assert modelo.predict([cel("LTE:9999:1")]).status == "no_matching_radio_keys"
 
 
 def test_selecao_nao_usa_o_teste(radiomapa, tmp_path, monkeypatch):
@@ -199,6 +278,10 @@ def test_protocolo_temporal_e_registrado_a_parte(radiomapa, tmp_path):
     bundle, _ = tr.train(radiomapa, "LTE", "temporal", str(tmp_path / "t.json"))
     assert bundle["protocol"] == "temporal" and bundle["training_groups"]["group_column"] == "session_id"
     assert bundle["validation"]["split"]["test_groups"] == [15, 16, 17, 18]  # 4 sessões mais recentes (dia 3)
+    v = bundle["validation"]
+    assert v["test_metrics"]["composition"] == {"known_points": 12}  # P3 a P6 também estão no treino
+    assert (v["test_reference"]["status"], v["test_reference"]["gnss_median_shared_points"]) == ("exploratoria", [5])
+    assert any("independência temporal completa" in w for w in v["warnings"])
 
 
 def test_grupos_insuficientes_e_k_incompativel_encerram_com_mensagem(tmp_path, radiomapa):
@@ -217,6 +300,7 @@ def test_cli_de_treino_gera_bundle_e_relatorio(radiomapa, tmp_path, capsys):
              "--report", str(relatorio), "--k", "1,3", "--missing", "sentinel:-145"])
     texto = capsys.readouterr().out
     assert "Protocolo: spatial (grupo = reference_point_id)" in texto and "fora da seleção" in texto
+    assert "Referência do teste: final" in texto and "AVISO: o teste tem um único grupo" in texto
     assert load_bundle(str(saida)).bundle["missing_policy"] == "sentinel:-145"
     assert json.loads(relatorio.read_text(encoding="utf-8"))["validation"]["grid"]["k"] == [1, 3]
     with pytest.raises(SystemExit, match="já existe"):

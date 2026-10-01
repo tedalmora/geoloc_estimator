@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from estimador.estimate import STATUS_UNAVAILABLE, STATUS_VALID
+from estimador.estimate import STATUS_UNAVAILABLE, STATUS_VALID, unavailable_reading
 from estimador.methods.cell_id import (
     STATUS_INVALID_REGISTRY,
     STATUS_MISSING_GLOBAL_CELL_KEY,
@@ -52,9 +52,12 @@ def test_leitura_sem_chave_global(tmp_path, chave):
     assert (est.status, est.lat) == (STATUS_MISSING_GLOBAL_CELL_KEY, None)
 
 
-def test_leitura_indisponivel(tmp_path):
-    est = estimate_cell_id(cadastro(tmp_path, [celula()]), CHAVE, reading_available=False)
-    assert (est.status, est.lat) == (STATUS_UNAVAILABLE, None)
+def test_regra_comum_de_leitura_indisponivel():
+    assert unavailable_reading("cell_id", "partial", "timeout") is None  # o Cell-ID não depende do #CSURV
+    assert unavailable_reading("wknn", "partial", "timeout").status == STATUS_UNAVAILABLE
+    assert unavailable_reading("wknn", "complete", "ok") is None
+    invalido = unavailable_reading("cell_id", "invalid", detail="moni:error")
+    assert (invalido.status, invalido.reason, invalido.lat) == (STATUS_UNAVAILABLE, "snapshot inválido: moni:error", None)
 
 
 def test_pci_nao_identifica_a_celula(tmp_path):

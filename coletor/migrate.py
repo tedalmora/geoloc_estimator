@@ -26,6 +26,7 @@ O v1 não guardava o suficiente para as identidades do v2, então nada é invent
 import argparse
 import json
 import os
+import sqlite3
 from datetime import datetime, timezone
 
 from acquisition.snapshot import utc_now_iso
@@ -205,7 +206,7 @@ def main(argv=None) -> None:
     args = parser.parse_args(argv)
     try:
         result = inspect(args.db) if args.command == "inspect" else migrate(args.db, args.out)
-    except (db.SchemaError, FileExistsError, FileNotFoundError, ValueError) as exc:
+    except (db.SchemaError, OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         raise SystemExit(f"erro: {exc}") from exc
     print(json.dumps(result, indent=2, ensure_ascii=False))
 

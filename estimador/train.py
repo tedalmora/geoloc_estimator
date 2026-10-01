@@ -10,6 +10,12 @@ Fluxo, sem vazamento entre grupos:
 4. o candidato de menor erro médio na validação é ajustado em todos os grupos de seleção e
    avaliado uma única vez no teste, que não participa da seleção.
 
+O bundle e o relatório registram a versão do software, grupos, pontos, sessões e amostras do
+teste, da seleção e de cada fold, a origem da referência do teste (final só com coordenadas
+cadastradas) e avisos de variância alta, referência exploratória ou compartilhada entre sessões.
+O teste é separado por tipo de ponto: no protocolo temporal, pontos sem amostras no treino
+(extrapolação espacial) não se misturam aos pontos conhecidos (generalização temporal).
+
 Uso (a partir de `codigo/`):
     python -m estimador.train --db radiomapa_v2.db --technology LTE --protocol spatial \\
         --out modelos/wknn_lte_spatial.json [--campaign-plmn 72406] [--report relatorio_lte_spatial.json]
@@ -18,6 +24,7 @@ import argparse
 import json
 import math
 import os
+import sqlite3
 import statistics
 from collections import Counter
 from dataclasses import asdict, dataclass
@@ -26,18 +33,28 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from acquisition.snapshot import utc_now_iso
 from coletor.db import SCHEMA_VERSION
+from software_version import software_version
 
 from .dataset import (
     GROUP_COLUMN,
+    POINT_KNOWN,
+    POINT_NEW,
+    POINT_NONE,
     PROTOCOLS,
     DatasetError,
     Sample,
     group_sizes,
     load_dataset,
     make_group_split,
+    point_type_warnings,
+    reference_summary,
+    reference_warnings,
     resolve_campaign_plmn,
     samples_in_groups,
     samples_sha256,
+    split_by_point_type,
+    split_report,
+    split_warnings,
 )
 from .evaluate import error_summary, percentile
 from .features import (
@@ -176,7 +193,7 @@ def select_candidate(samples: Sequence[Sample], split, policy: CellFilterPolicy,
                             if k > len(train_vectors):
                                 skipped[candidate] = f"k={k} maior que o treino do fold ({len(train_vectors)} amostras)"
                                 continue
-                            x, y, _ = wknn_from_sorted(ordered, xs, ys, k)
+                            x, y, _, _ = wknn_from_sorted(ordered, xs, ys, k)
                             errors.setdefault(candidate, []).append(math.hypot(x - qx, y - qy))
     valid = {c: e for c, e in errors.items() if c not in skipped and e}
     if not valid:
@@ -248,10 +265,12 @@ def train(db_path: str, technology: str, protocol: str, out_path: str, campaign_
     best, ranking, details = select_candidate(selection, split, policy, grid)
 
     bundle = build_bundle(selection, policy, best, protocol)
+    bundle["software_version"] = software_version()
     bundle["reference_policy"] = dataset.reference_policy()
+    known_points = sorted({s.reference_point_id for s in selection if s.reference_point_id is not None})
     bundle["training_groups"] = {"protocol": protocol, "group_column": GROUP_COLUMN[protocol],
                                  "groups": group_sizes(selection, protocol, split.selection_groups),
-                                 "n_samples": len(selection)}
+                                 "n_samples": len(selection), "reference_point_ids": known_points}
     bundle["dataset"] = {
         "source_db": os.path.basename(db_path), "schema_version": SCHEMA_VERSION,
         "samples_sha256": samples_sha256(samples), "n_eligible_samples": len(samples),
@@ -260,13 +279,20 @@ def train(db_path: str, technology: str, protocol: str, out_path: str, campaign_
         "test_measurement_ids": sorted(s.measurement_id for s in test), "test_samples_sha256": samples_sha256(test),
     }
     bundle["validation"] = {
-        "split": split.to_dict(), "test_fraction": test_fraction, "seed": seed,
+        "split": split.to_dict(), "subsets": split_report(samples, split), "test_fraction": test_fraction, "seed": seed,
         "grid": {"k": list(grid.k), "metrics": list(grid.metrics), "scalings": list(grid.scalings), "missing": list(grid.missing)},
         "selection_criterion": "menor erro médio (m) nas amostras de validação dos folds; desempate por p90",
         "chosen": asdict(best), "validation_metrics": ranking[0], "ranking_top": ranking[:10], **details,
+        "test_reference": reference_summary(test),
+        "warnings": (split_warnings(protocol, split.test_groups, [len(train) for train, _ in split.folds])
+                     + reference_warnings(test, protocol) + point_type_warnings(test, set(known_points), protocol)),
     }
     model = WknnModel(bundle)
-    bundle["validation"]["test_metrics"] = evaluate_model(model, test)
+    by_type = dict(sorted(split_by_point_type(test, set(known_points)).items()))
+    bundle["validation"]["test_metrics"] = {**evaluate_model(model, test),
+                                           "composition": {kind: len(items) for kind, items in by_type.items()}}
+    bundle["validation"]["test_metrics_by_point_type"] = {kind: evaluate_model(model, items)
+                                                         for kind, items in by_type.items()}
     save_bundle(bundle, out_path)
     report = {key: value for key, value in bundle.items() if key != "fingerprints"}
     report["dataset_summary"] = dataset.summary()
@@ -278,24 +304,41 @@ def _fmt(value, unit=" m") -> str:
     return "-" if value is None else f"{value:.1f}{unit}"
 
 
+def _metrics_text(t: dict) -> str:
+    return (f"{t['n']}/{t['n_total']} válidas; média {_fmt(t['mean_m'])}, mediana {_fmt(t['median_m'])}, "
+            f"RMSE {_fmt(t['rmse_m'])}, p90 {_fmt(t['p90_m'])}, p95 {_fmt(t['p95_m'])}, máx {_fmt(t['max_m'])}")
+
+
+POINT_TYPE_LABELS = {POINT_KNOWN: "pontos conhecidos (generalização temporal)",
+                     POINT_NEW: "pontos novos (extrapolação espacial)", POINT_NONE: "rotas, sem ponto"}
+
+
 def _print_summary(bundle: dict, report: dict, out_path: str) -> None:
     v = bundle["validation"]
     split = v["split"]
     print(f"Protocolo: {bundle['protocol']} (grupo = {split['group_column']}); tecnologia {bundle['technology']}; "
-          f"PLMN da campanha {bundle['cell_filter_policy']['campaign_plmn']}")
+          f"PLMN da campanha {bundle['cell_filter_policy']['campaign_plmn']}; software {bundle['software_version']}")
     print(f"Amostras elegíveis: {bundle['dataset']['n_eligible_samples']}; excluídas: "
           f"{ {**bundle['dataset']['excluded_from_dataset'], **bundle['dataset']['excluded_by_protocol_or_policy']} }")
-    print(f"Grupos de teste: {split['test_groups']}; grupos de seleção: {split['selection_groups']} "
-          f"({len(split['folds'])} folds)")
+    for name, label in (("test", "Teste"), ("selection", "Seleção")):
+        s = v["subsets"][name]
+        print(f"{label}: {s['groups']} grupos, {s['points']} pontos, {s['sessions']} sessões, {s['samples']} amostras")
+    for i, fold in enumerate(v["subsets"]["folds"], 1):
+        t, val = fold["train"], fold["validation"]
+        print(f"  fold {i}: treino {t['groups']} grupos/{t['samples']} amostras; validação {val['groups']} grupos/"
+              f"{val['samples']} amostras")
     print("Seleção por validação (top 5):")
     for row in report["validation"]["ranking"][:5]:
         print(f"  k={row['k']:<2} {row['metric']} {row['scaling']:<12} {row['missing']:<16} "
               f"média {_fmt(row['mean_m'])}  p90 {_fmt(row['p90_m'])}  n={row['n']}")
-    t = v["test_metrics"]
     print(f"Escolhido: {v['chosen']}; {len(bundle['cell_keys'])} colunas; ausência = {bundle['missing_value']:g} dBm")
-    print(f"Teste ({bundle['protocol']}, fora da seleção): {t['n']}/{t['n_total']} estimativas válidas; média "
-          f"{_fmt(t['mean_m'])}, mediana {_fmt(t['median_m'])}, RMSE {_fmt(t['rmse_m'])}, p90 {_fmt(t['p90_m'])}, "
-          f"p95 {_fmt(t['p95_m'])}, máx {_fmt(t['max_m'])}")
+    print(f"Referência do teste: {v['test_reference']['status']} {v['test_reference']['sources']}")
+    print(f"Teste ({bundle['protocol']}, fora da seleção), todas as amostras {v['test_metrics']['composition']}: "
+          f"{_metrics_text(v['test_metrics'])}")
+    for kind, metrics in v["test_metrics_by_point_type"].items():
+        print(f"  {POINT_TYPE_LABELS[kind]}: {_metrics_text(metrics)}")
+    for warning in v["warnings"]:
+        print(f"AVISO: {warning}")
     print(f"Bundle: {out_path}")
 
 
@@ -332,7 +375,7 @@ def main(argv=None) -> None:
         bundle, report = train(args.db, args.technology, args.protocol, args.out, args.campaign_plmn, grid,
                                args.test_fraction, args.folds, args.seed, args.include_other_plmn,
                                args.include_unknown_plmn, args.include_forbidden, args.allow_single_gnss)
-    except (DatasetError, BundleError, MissingValueError, FileExistsError, ValueError) as exc:
+    except (DatasetError, BundleError, MissingValueError, OSError, ValueError, sqlite3.Error) as exc:
         raise SystemExit(f"erro: {exc}") from exc
     if args.report:
         with open(args.report, "w", encoding="utf-8") as f:

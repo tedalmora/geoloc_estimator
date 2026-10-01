@@ -62,6 +62,15 @@ def test_snapshot_sem_nenhuma_celula_e_invalido(sem_espera):
     assert s.reasons[:3] == ["moni:error", "servinfo:error", "csurv:error"]
 
 
+def test_registro_repetido_da_servidora_no_csurv_mantem_o_snapshot_completo(sem_espera):
+    linhas = at_lines("csurv_vivo_campo.txt")
+    registro = [linha for linha in linhas if linha.startswith(("earfcn", "cellStatus"))]
+    s = take_snapshot(driver_com(ciclo(**{"AT#CSURV": linhas[:-1] + registro + ["OK"]}), sem_espera))
+    assert (s.status, s.reasons, s.serving.radio_key) == ("complete", [], "LTE:3375:254")
+    assert "registro_servidora_repetido_csurv:2" in s.anomalies
+    assert sum(o.is_serving for o in s.observations if o.source == "CSURV") == 1
+
+
 def test_modem_mudo_nao_espera_o_csurv(sem_espera):
     driver = driver_com({}, sem_espera)
     driver._ser.responses = {"AT#MONI": [], "AT#SERVINFO": []}

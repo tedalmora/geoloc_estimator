@@ -27,10 +27,15 @@ prioridade:
 Cada medição guarda o GNSS do modem com tipo de fix, HDOP, número de satélites e hora UTC.
 
 A sessão termina sempre com `status` `completed`, `interrupted` (SIGINT/SIGTERM ou Ctrl+C) ou
-`error` (a exceção fica em `end_reason`), além de `ended_at`, mesmo quando há exceção. Toda
+`error` (a exceção fica em `end_reason`), além de `ended_at`, mesmo quando há exceção. SIGINT e
+SIGTERM encerram depois do ciclo em andamento também no modo `once`; um sinal antes de a sessão
+ser criada não cria sessão. `SIGKILL` ou falta de energia deixam a sessão `running`: a próxima
+execução avisa e não a altera. Toda
 tentativa vira uma linha em `measurements`, inclusive as inválidas (`snapshot_status` e
 `reasons_json`). Os `health_checks` ficam ligados à sessão e registram início, fim, falhas,
-recuperações, reconexões e uma checagem periódica (`--health-interval`).
+recuperações, reconexões e uma checagem periódica (`--health-interval`). O `metadata_json` da
+sessão guarda a `software_version` (`TCC_SOFTWARE_VERSION`, senão o arquivo `VERSION`, senão o
+commit git, senão `unknown`).
 
 ## Comandos
 
@@ -54,8 +59,10 @@ python -m coletor.daemon continuous --port /dev/ttyUSB2 --db radiomapa_v2.db --i
 
 `--campaign-plmn` registra a operadora da campanha (MCC+MNC). As células de outras operadoras
 e as `CELL_FORBIDDEN` são gravadas do mesmo jeito, e a escolha do que entra nas features é do
-Estimador. Antes da sessão, o Coletor consulta `AT$GPSP?` e só liga o GNSS se estiver desligado.
-Nenhuma configuração persistente do modem é alterada.
+Estimador. Antes da sessão, o Coletor consulta `AT$GPSP?` e só liga o GNSS se estiver desligado
+(**altera estado**: `AT$GPSP=1` apaga a memória GNSS e tem configuração salva, "Setting saved:
+Other", manual p. 763). Nenhum outro comando de configuração é enviado. Cenários aceitos:
+`estatico` e `pedestre`.
 
 ## Banco v2 (resumo)
 
@@ -79,8 +86,12 @@ python -m coletor.export_csv restore --from backups/2026-09-30 --db restaurado_v
 ```
 
 O export gera `sessions.csv`, `reference_points.csv`, `measurements.csv`, `observed_cells.csv`,
-`health_checks.csv` e `metadata.json` (SHA-256 e contagem por arquivo; NULL = `\N`). A
-restauração cria um banco novo e confere tudo.
+`health_checks.csv` e `metadata.json` (SHA-256 e contagem por arquivo; NULL = `\N`). Todas as
+tabelas são lidas numa única transação de leitura: o export é um estado único do banco, mesmo
+com o Coletor gravando ao mesmo tempo. A restauração cria um banco novo e confere tudo; só
+aceita um `metadata.json` com exatamente as tabelas do schema e, para cada tabela, o arquivo
+`<tabela>.csv` na própria pasta do export (caminhos com `..`, subpastas ou absolutos são
+recusados).
 
 ## Bancos v1: inspeção e migração não destrutiva
 
@@ -100,7 +111,8 @@ identidade é inventada:
 ## Relação com o Estimador
 
 O Estimador (`estimador.train` e `estimador.evaluate`) lê o schema v2 em modo somente leitura e
-recusa o v1 (`schema_v1`). Entram só leituras com `#CSURV` válido e referência posicional; as
-linhas migradas ambíguas ficam fora (ver `estimador/README.md`). O `estimador/live.py` não
+recusa o v1 (`schema_v1`). Entram nas amostras só leituras com `#CSURV` válido e referência
+posicional; as demais tentativas (exceto as linhas migradas ambíguas) contam na cobertura
+operacional do `evaluate compare` (ver `estimador/README.md`). O `estimador/live.py` não
 depende do Coletor: lê o modem pela mesma aquisição compartilhada.
 

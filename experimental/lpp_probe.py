@@ -63,8 +63,11 @@ def main(argv=None) -> None:
     text = json.dumps(record, indent=2, ensure_ascii=False)
     print(text)
     if args.out:
-        with open(args.out, "x", encoding="utf-8") as f:
-            f.write(text + "\n")
+        try:
+            with open(args.out, "x", encoding="utf-8") as f:
+                f.write(text + "\n")
+        except OSError as exc:
+            raise SystemExit(f"erro: não foi possível gravar {args.out}: {exc}") from exc
 
 
 if __name__ == "__main__":

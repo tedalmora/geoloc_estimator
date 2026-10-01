@@ -1,4 +1,4 @@
-"""Pacote HAL -- biblioteca on-demand para falar com os modems celulares (FN990 e futuros).
+"""Pacote HAL -- biblioteca sob demanda para o modem Telit Cinterion FN990 (único implementado).
 
-Ver planejamento/arquitetura_hal.md para as decisões de arquitetura por trás deste pacote.
+Comandos, leituras e limites: hal/README.md.
 """

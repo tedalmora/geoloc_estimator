@@ -2,7 +2,10 @@
 
 Síncrono: 1 processo, 1 modem, 1 conexão SQLite. Cada ciclo é take_snapshot + gravação. Toda
 tentativa vira 1 linha em `measurements`, inclusive as inválidas (com os motivos). A sessão
-sempre termina com status final (completed, interrupted ou error), mesmo com exceção.
+termina com status final (completed, interrupted ou error) mesmo com exceção; SIGINT e SIGTERM,
+em once e em continuous, encerram depois do ciclo em andamento com `interrupted` e o nome do
+sinal. SIGKILL e queda de energia não permitem encerramento: a sessão fica `running`, e a
+próxima execução avisa (as sessões não são alteradas).
 
 Toda sessão de coleta exige um ponto de referência (`--reference-point`, medição parada num
 ponto) ou uma rota (`--route`, medição em movimento). Ponto inexistente é criado sem
@@ -34,6 +37,7 @@ from hal.fn990_driver import FN990Driver
 from hal.health import HealthMonitor
 from hal.modem_driver import ModemDriver
 from hal.models import to_jsonable
+from software_version import software_version
 
 from . import db
 
@@ -68,6 +72,7 @@ def _session_metadata(args: argparse.Namespace, driver: ModemDriver, prepare) ->
     status = driver.get_status()
     return {
         "schema_version": db.SCHEMA_VERSION,
+        "software_version": software_version(),
         "port": args.port,
         "baudrate": args.baudrate,
         "interval_s": getattr(args, "interval", None),
@@ -94,7 +99,7 @@ def _open_modem(args: argparse.Namespace) -> ModemDriver:
 
 
 class _StopFlag:
-    """Sinal de parada do modo contínuo (SIGINT/SIGTERM): termina depois do ciclo em andamento."""
+    """SIGINT/SIGTERM (once e continuous): a sessão termina `interrupted` depois do ciclo em andamento."""
 
     def __init__(self) -> None:
         self.event = threading.Event()
@@ -125,8 +130,8 @@ def _collect(conn, driver: ModemDriver, session_id: int, seq: int, point_id: Opt
     return snap
 
 
-def _loop(args, driver: ModemDriver, conn, session_id: int, point_id: Optional[int], stop: _StopFlag) -> bool:
-    """Modo contínuo. Devolve True ao atingir --max-measurements/--duration-s e False se parado por sinal."""
+def _loop(args, driver: ModemDriver, conn, session_id: int, point_id: Optional[int], stop: _StopFlag) -> None:
+    """Modo contínuo, até --max-measurements/--duration-s ou até um sinal."""
     health = HealthMonitor()
     start = time.monotonic()
     last_health = start
@@ -154,13 +159,12 @@ def _loop(args, driver: ModemDriver, conn, session_id: int, point_id: Optional[i
             except (ConnectionError, OSError) as exc:
                 db.insert_health_check(conn, session_id, args.modem_id, "reconnect_failed", False, str(exc))
         if args.max_measurements and seq >= args.max_measurements:
-            return True
+            return
         if args.duration_s and time.monotonic() - start >= args.duration_s:
-            return True
+            return
         delay = next_due(start, args.interval, time.monotonic()) - time.monotonic()
         if delay > 0:
             stop.event.wait(delay)
-    return False
 
 
 def _close_session(conn, session_id: int, modem_id: str, status: str, reason: Optional[str]) -> None:
@@ -172,8 +176,12 @@ def _close_session(conn, session_id: int, modem_id: str, status: str, reason: Op
     print(f"Sessão {session_id} encerrada: {status}" + (f" ({reason})" if reason else ""))
 
 
-def run_session(args: argparse.Namespace, driver: ModemDriver, conn, stop: _StopFlag) -> int:
-    """Executa a sessão (once ou continuous) e devolve o session_id."""
+def run_session(args: argparse.Namespace, driver: ModemDriver, conn, stop: _StopFlag) -> Optional[int]:
+    """Executa a sessão (once ou continuous) e devolve o session_id (None se um sinal chegou antes dela)."""
+    orphans = db.running_sessions(conn)
+    if orphans:
+        print(f"AVISO: sessão(ões) {', '.join(map(str, orphans))} ainda 'running', sem encerramento registrado "
+              "(interrupção não tratável, como SIGKILL ou queda de energia). Elas não são alteradas; trate-as na análise.")
     point_id = None
     if args.reference_point:
         point_id, created, has_coord = db.get_or_create_reference_point(conn, args.reference_point)
@@ -185,6 +193,9 @@ def run_session(args: argparse.Namespace, driver: ModemDriver, conn, stop: _Stop
         print("AVISO: --campaign-plmn não informado; o Estimador precisará decidir a operadora da campanha.")
     prepare = driver.prepare_for_collection()
     metadata = _session_metadata(args, driver, prepare)
+    if stop.event.is_set():
+        print(f"{stop.reason} recebido antes do início: nenhuma sessão foi criada.")
+        return None
     session_id = db.create_session(
         conn, mode=args.command, scenario=args.scenario, environment=args.environment, modem_id=args.modem_id,
         metadata=metadata, reference_point_id=point_id, route=args.route, campaign_plmn=args.campaign_plmn,
@@ -194,17 +205,15 @@ def run_session(args: argparse.Namespace, driver: ModemDriver, conn, stop: _Stop
     print(f"Sessão {session_id} iniciada ({args.command}).")
     status, reason = "error", None
     try:
-        if args.command == "once":
+        if args.command == "continuous":
+            _loop(args, driver, conn, session_id, point_id, stop)
+        elif not stop.event.is_set():
             snap = _collect(conn, driver, session_id, 1, point_id)
             if not snapshot_alive(snap):
                 db.insert_health_check(conn, session_id, args.modem_id, "failure", False,
                                        snap.transport_error or ",".join(snap.reasons))
-            status = "completed"
-        elif _loop(args, driver, conn, session_id, point_id, stop):
-            status = "completed"
-        else:
-            status, reason = "interrupted", f"sinal {stop.reason}"
-    except KeyboardInterrupt:
+        status, reason = ("interrupted", f"sinal {stop.reason}") if stop.event.is_set() else ("completed", None)
+    except KeyboardInterrupt:  # sem tratador instalado (fora da thread principal)
         status, reason = "interrupted", "KeyboardInterrupt"
     except BaseException as exc:
         status, reason = "error", f"{type(exc).__name__}: {exc}"
@@ -290,7 +299,7 @@ def main(argv=None) -> None:
             else:
                 driver = _open_modem(args)
                 stop = _StopFlag()
-                previous = _install_handlers(stop) if args.command == "continuous" else {}
+                previous = _install_handlers(stop)
                 try:
                     run_session(args, driver, conn, stop)
                 finally:
@@ -299,7 +308,7 @@ def main(argv=None) -> None:
                     driver.close()
         finally:
             conn.close()
-    except (db.SchemaError, ConnectionError, ValueError) as exc:
+    except (db.SchemaError, OSError, ValueError, sqlite3.Error) as exc:
         raise SystemExit(f"erro: {exc}") from exc
 
 

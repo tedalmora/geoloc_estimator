@@ -36,7 +36,6 @@ codigo/
     estimador/        # Cell-ID + WKNN: OFFLINE (train.py, evaluate.py) e ONLINE (live.py); detalhes no README dele
         network_registry.example.json  # modelo do cadastro de células (por global_cell_key) -- copie e preencha
         live.py                # ONLINE -- 1 leitura do modem -> 1 estimativa (wknn ou cell-id), sem depender do Coletor
-        db.py                   # formato do banco position_estimates do live.py antigo (só leitura, evaluate live)
         methods/
             cell_id.py            # Cell-ID por global_cell_key + validação do cadastro (baseline)
             fingerprint.py        # Fingerprinting WKNN (Python puro, bundle JSON) -- único com treino
@@ -44,6 +43,8 @@ codigo/
     deprecated/       # histórico (compare/infer/relatorio antigos); nada ativo importa daqui
     requirements.txt      # runtime do alvo: só pyserial (HAL, aquisição, Coletor, Estimador)
     requirements-dev.txt  # PC de desenvolvimento: pytest
+    software_version.py   # versão gravada nas sessões e nos bundles (TCC_SOFTWARE_VERSION, VERSION ou commit git)
+    VERSION               # versão do código quando não há git (ex.: cópia para o Raspberry Pi)
     tests/                # pytest; fixtures AT rotuladas em tests/fixtures/at/
     README.md         # este arquivo
 ```
@@ -139,7 +140,7 @@ para a explicação completa (o que cada método faz/não faz e para qual geoloc
 ```bash
 python -m hal.cli --port /dev/ttyUSB2 alive       # "Vivo" ou "Sem resposta"
 python -m hal.cli --port /dev/ttyUSB2 status      # fabricante, modelo, firmware, IMEI, SIM, uptime, temperatura...
-python -m hal.cli --port /dev/ttyUSB2 prepare     # liga o GNSS só se AT$GPSP? disser que está desligado
+python -m hal.cli --port /dev/ttyUSB2 prepare     # ALTERA ESTADO se o GNSS estiver parado: AT$GPSP=1 (ver abaixo)
 python -m hal.cli --port /dev/ttyUSB2 moni        # célula servidora LTE/NR e modo de acesso (AT#MONI)
 python -m hal.cli --port /dev/ttyUSB2 servinfo    # PLMN da servidora (AT#SERVINFO)
 python -m hal.cli --port /dev/ttyUSB2 csurv       # varredura de células com radio_key/global_cell_key (AT#CSURV, até 3 min)
@@ -152,11 +153,16 @@ conferidos no manual do FN990 (Rev.5) e em fragmentos de campo, e os parsers tê
 fixtures rotuladas (`tests/fixtures/at/`). Uma resposta fora do formato esperado vira
 `status: malformed`, sem exceção; nesse caso, guarde a resposta crua e acrescente uma fixture.
 
+**Comandos que alteram o estado do modem:** `reboot` e a preparação do GNSS (`hal.cli prepare`,
+`acquisition.snapshot` sem `--no-prepare` e as sessões `once`/`continuous` do Coletor). A
+preparação consulta `AT$GPSP?` e, só se o GNSS estiver parado, envia `AT$GPSP=1`, que liga o
+receptor, apaga a memória GNSS e tem configuração salva ("Setting saved: Other", manual p. 763).
+
 Para ver uma leitura completa (o mesmo snapshot usado pelo Coletor e pelo `live.py`):
 
 ```bash
-python -m acquisition.snapshot --port /dev/ttyUSB2               # prepare do GNSS + 1 snapshot em JSON
-python -m acquisition.snapshot --port /dev/ttyUSB2 --no-prepare  # só o snapshot, como no live.py
+python -m acquisition.snapshot --port /dev/ttyUSB2               # prepare do GNSS (ALTERA ESTADO) + 1 snapshot em JSON
+python -m acquisition.snapshot --port /dev/ttyUSB2 --no-prepare  # só o snapshot, como no live.py (só leituras)
 ```
 
 O snapshot sai `complete`, `partial` ou `invalid`, com os motivos (`reasons`) e a latência de
@@ -187,17 +193,22 @@ python -m coletor.daemon continuous --port /dev/ttyUSB2 --db radiomapa_v2.db --i
     --scenario pedestre --environment outdoor --route trilha_1 --campaign-plmn 72406
 ```
 
-- `--scenario`: `estatico` | `pedestre` | `veicular` (só rótulo da sessão; não há método de
-  posicionamento veicular)
+- `--scenario`: `estatico` | `pedestre` (só rótulo da sessão)
 - `--environment`: `indoor` | `outdoor`
 - `--reference-point NOME` ou `--route NOME`: um dos dois é obrigatório
 - `--db`: arquivo SQLite v2, criado se não existir. Na Raspberry Pi, use uma partição de dados
   (ex.: `/data/radiomapa_v2.db`). Um banco v1 é recusado sem alteração; veja a migração abaixo.
+- `--port`: na Raspberry Pi, prefira o nome estável em `/dev/serial/by-id/` (o número do
+  `ttyUSBx` pode mudar entre boots); confira o nome no próprio Pi.
 
 No modo contínuo, o Coletor registra saúde no início e no fim, em transições (falha ou
 recuperação) e periodicamente. Depois de 3 ciclos seguidos sem resposta, ele tenta reconectar.
-`Ctrl+C` ou `SIGTERM` encerram depois do ciclo em andamento, e a sessão fica `interrupted`.
-Uma exceção deixa a sessão `error`, com o motivo registrado.
+`Ctrl+C` (SIGINT) ou `SIGTERM` encerram depois do ciclo em andamento, nos modos `continuous` e
+`once`, e a sessão fica `interrupted`; um sinal recebido antes de a sessão ser criada não cria
+sessão. Uma exceção deixa a sessão `error`, com o motivo registrado. `SIGKILL` ou falta de
+energia não dão chance de encerrar: a sessão fica `running`, e a próxima execução só avisa (não
+altera a sessão antiga). Cada sessão grava nos metadados a `software_version`: a variável
+`TCC_SOFTWARE_VERSION`, senão o arquivo `VERSION`, senão o commit git, senão `unknown`.
 
 ### Backup completo em CSV e restauração
 
@@ -207,8 +218,10 @@ python -m coletor.export_csv restore --from backups/2026-09-30 --db restaurado_v
 ```
 
 Rode o export ao fim de cada sessão de campo. Ele cria um CSV por tabela e um `metadata.json`
-com SHA-256 e contagens, e a restauração reconstrói o banco inteiro. É o backup que sobrevive
-mesmo se o cartão SD corromper.
+com SHA-256 e contagens, lendo o banco numa única transação de leitura (estado consistente
+mesmo com o Coletor gravando), e a restauração reconstrói o banco inteiro. A restauração só
+aceita `metadata.json` com exatamente as tabelas do schema e arquivos `<tabela>.csv` na própria
+pasta do export. É o backup que sobrevive mesmo se o cartão SD corromper.
 
 ### Bancos v1 antigos: inspeção e migração não destrutiva
 
@@ -236,8 +249,11 @@ After=network.target
 WorkingDirectory=/home/pi/tcc-codigo
 ExecStart=/home/pi/tcc-codigo/venv/bin/python -m coletor.daemon continuous --interval 60 \
     --scenario pedestre --environment outdoor --route trilha_1 --campaign-plmn 72406 \
-    --port /dev/ttyUSB2 --db /data/radiomapa_v2.db
+    --port /dev/serial/by-id/<porta-AT-do-FN990> --db /data/radiomapa_v2.db
 Restart=on-failure
+# o #CSURV pode levar até 3 min; o padrão do systemd (90 s) mataria o processo com SIGKILL
+# antes do fim do ciclo, e a sessão ficaria 'running' (confirmar o valor no Raspberry Pi)
+TimeoutStopSec=240
 
 [Install]
 WantedBy=multi-user.target
@@ -246,6 +262,7 @@ WantedBy=multi-user.target
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now coletor-tcc.service
+systemctl show coletor-tcc.service -p TimeoutStopUSec   # deve mostrar 4min
 journalctl -u coletor-tcc.service -f   # acompanhar o log em tempo real
 ```
 
@@ -263,7 +280,7 @@ O Cell-ID devolve a posição cadastrada da célula servidora (busca pela `globa
 python -m estimador.train --db radiomapa_v2.db --technology LTE --protocol spatial --out modelos/wknn_lte_spatial.json
 python -m estimador.train --db radiomapa_v2.db --technology LTE --protocol temporal --out modelos/wknn_lte_temporal.json
 
-# WKNN e Cell-ID nas mesmas amostras de teste do bundle; validação do cadastro
+# WKNN e Cell-ID em todas as tentativas dos grupos de teste do bundle; validação do cadastro
 python -m estimador.evaluate compare --db radiomapa_v2.db --model modelos/wknn_lte_spatial.json \
     --registry estimador/network_registry.json --out resumo_spatial.csv
 python -m estimador.evaluate cell-id --db radiomapa_v2.db --registry estimador/network_registry.json
@@ -273,10 +290,12 @@ python -m estimador.live wknn --port /dev/ttyUSB2 --model modelos/wknn_lte_spati
 python -m estimador.live cell-id --port /dev/ttyUSB2 --registry estimador/network_registry.json
 ```
 
-O treino do WKNN exige grupos suficientes no protocolo escolhido (pelo menos 3 pontos de
-referência ou 3 sessões com referência posicional) e encerra com
-`spatial_validation_unavailable`/`temporal_validation_unavailable: insufficient_groups` quando
-faltam; não há divisão aleatória por linha.
+O treino do WKNN exige grupos suficientes no protocolo escolhido. O mínimo técnico é 4 grupos
+(pontos de referência no `spatial`, sessões no `temporal`): 1 de teste e 3 de seleção, com
+pelo menos 2 grupos de treino em cada fold. Abaixo disso, o treino encerra com
+`spatial_validation_unavailable`/`temporal_validation_unavailable: insufficient_groups`; não há
+divisão aleatória por linha. O mínimo não garante resultado estável: com poucos grupos, o
+relatório avisa que a variância é alta.
 
 ---
 
@@ -288,17 +307,28 @@ faltam; não há divisão aleatória por linha.
   `modem_sem_resposta`, `servidora_sem_radio_key:<método>` e `servidora_sem_global_cell_key`. O
   Coletor grava todas as tentativas, inclusive as inválidas.
 - **Estimativa** (`PositionEstimate`): `valid`, `unavailable`, `technology_mismatch`,
-  `unknown_cell`, `missing_global_cell_key`, `invalid_registry` e `invalid_input` no caminho
-  principal; `unsupported` e `geometry_degenerate` só nos módulos experimentais. Sem estimativa,
-  `lat`/`lon` ficam vazios e `reason` diz o porquê; nunca há coordenada inventada.
-- **Cobertura** = estimativas válidas / leituras avaliadas. Os erros (média, mediana/CE50, RMSE,
-  p90, p95, máximo e CDF) são calculados só sobre as válidas, sempre junto da cobertura e da
-  contagem de cada estado.
-- **Referência posicional:** coordenada cadastrada do ponto; senão, mediana de pelo menos 3
-  leituras GNSS do ponto, com a dispersão registrada. O GNSS do modem tem incerteza própria e não
-  é tratado como verdade absoluta.
+  `no_matching_radio_keys`, `unknown_cell`, `missing_global_cell_key`, `invalid_registry` e
+  `invalid_input` no caminho principal; `unsupported` e `geometry_degenerate` só nos módulos
+  experimentais. Sem estimativa, `lat`/`lon` ficam vazios e `reason` diz o porquê; nunca há
+  coordenada inventada.
+- **Cobertura** (no `evaluate compare`, sobre todas as tentativas dos grupos de teste, inclusive
+  as que falharam antes do método): operacional = estimativas válidas / tentativas; específica =
+  válidas / tentativas elegíveis para o método (WKNN: `#CSURV` lido; Cell-ID: servidora com
+  `global_cell_key`). Os erros (média, mediana/CE50, RMSE, p90, p95, máximo e CDF) são calculados
+  só sobre as válidas, sempre junto da cobertura e da contagem de cada estado. WKNN e Cell-ID só
+  são comparados diretamente no **subconjunto comum** (tentativas em que os dois estimaram).
+- **Referência posicional:** coordenada cadastrada do ponto (referência final); senão, mediana de
+  pelo menos 3 leituras GNSS do ponto, com a dispersão registrada (referência exploratória,
+  avisada nos relatórios). O GNSS do modem tem incerteza própria e não é tratado como verdade
+  absoluta; para resultados finais, cadastre coordenadas levantadas.
 - **Protocolos:** resultados `spatial` (pontos novos) e `temporal` (sessões novas nos mesmos
-  pontos) medem capacidades diferentes e são relatados separadamente.
+  pontos) medem capacidades diferentes e são relatados separadamente. No `temporal`, pontos do
+  teste sem amostras no treino são relatados à parte (`new_points`, extrapolação espacial), e uma
+  referência por mediana GNSS que junta fixes de várias sessões tira a independência temporal
+  completa (há aviso).
+- **WKNN, distância zero e empates:** leitura idêntica a amostras do bundle dá a média simples de
+  todas as amostras idênticas (mesmo que sejam mais que k); empate na k-ésima distância fica com
+  a amostra que vem antes no bundle.
 
 ## 7. Componentes experimentais (`experimental/`)
 
@@ -345,10 +375,11 @@ entre requisitos, código e testes está em `planejamento/RASTREABILIDADE_CODIGO
 | Resposta vem sempre `ERROR` ou vazia | Porta serial errada (não é a porta AT) | Teste outras portas `ttyUSBx` até achar a que responde `OK` a `AT` |
 | `sqlite3.OperationalError: database is locked` | Duas instâncias do Coletor abertas ao mesmo tempo sobre o mesmo `.db` | Rode só 1 instância do Coletor por banco |
 | `estimador.evaluate`/`live` dá erro de subcomando | Esqueceu o subcomando logo após o nome do módulo | Ex.: `python -m estimador.evaluate compare --db ...` (subcomando vem antes das flags) |
-| `insufficient_groups` ao treinar | Poucos pontos de referência (spatial) ou sessões (temporal) com referência posicional | Colete mais pontos/sessões antes de treinar o WKNN |
+| `insufficient_groups` ao treinar | Menos de 4 pontos de referência (spatial) ou sessões (temporal) com referência posicional, ou fold com menos de 2 grupos de treino | Colete mais pontos/sessões; para o fold, aumente `--folds` |
 | `invalid_registry` ao usar `cell-id` | Cadastro ausente, no formato antigo (chave por PCI) ou com campo inválido | Copie `estimador/network_registry.example.json` e preencha por `global_cell_key`; a mensagem indica a entrada e o campo |
-| `estimador.live` termina com `snapshot inválido` ou `unavailable` | A leitura não trouxe células (ou, no WKNN, nenhuma `radio_key` do bundle) | Veja os motivos impressos; rode `python -m acquisition.snapshot --port ...` para ver a leitura completa |
-| `Sem fix GNSS ainda` | GNSS ainda não conseguiu um *fix* (TTFF) | Aguarde alguns minutos em ambiente aberto (ver `planejamento/guia_comandos_modem.md`, Seção 8) |
+| `estimador.live` termina com `snapshot inválido`, `unavailable` ou `no_matching_radio_keys` | A leitura não trouxe células, o `#CSURV` falhou ou, no WKNN, nenhuma `radio_key` do bundle foi vista | Veja os motivos impressos; rode `python -m acquisition.snapshot --port ... --no-prepare` para ver a leitura completa |
+| Motivo `gnss:no_fix` no snapshot (ou `status: no_fix` no `hal.cli gnss`) | GNSS ainda não conseguiu um *fix* (TTFF) | Aguarde alguns minutos em ambiente aberto (ver `planejamento/guia_comandos_modem.md`, Seção 8) |
+| Aviso `sessão(ões) ... ainda 'running'` ao iniciar o Coletor | Uma execução anterior foi morta sem encerrar (SIGKILL, falta de energia, `TimeoutStopSec` curto) | Nada é alterado; trate a sessão como incompleta na análise e confira o `TimeoutStopSec` do serviço |
 
 ---
 

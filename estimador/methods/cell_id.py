@@ -11,7 +11,8 @@ lat e lon. Opcionais: sector_azimuth_deg [0, 360), sector_width_deg (0, 360], ar
 pci (LTE 0-503, NR 0-1007) e description; azimute, ARFCN e PCI são só metadados de auditoria.
 Campos desconhecidos e chaves repetidas são erro; chaves de topo iniciadas por "_" são comentários.
 
-Estados: valid, unknown_cell, missing_global_cell_key, invalid_registry, unavailable.
+Estados: valid, unknown_cell, missing_global_cell_key e invalid_registry. Leitura que não serve
+(snapshot inválido) vira `unavailable` antes de chegar aqui (estimate.unavailable_reading).
 """
 import json
 import math
@@ -21,7 +22,7 @@ from typing import Dict, Optional
 
 from hal.models import make_global_cell_key
 
-from ..estimate import STATUS_UNAVAILABLE, STATUS_VALID, PositionEstimate
+from ..estimate import STATUS_VALID, PositionEstimate
 from ..geometry import validate_lat_lon
 
 METHOD = "cell_id"
@@ -142,11 +143,9 @@ def load_registry(path: str) -> CellRegistry:
         return CellRegistry(source=path, error=f"{path}: {exc}")
 
 
-def estimate_cell_id(registry: CellRegistry, global_cell_key: Optional[str], reading_available: bool = True) -> PositionEstimate:
+def estimate_cell_id(registry: CellRegistry, global_cell_key: Optional[str]) -> PositionEstimate:
     if not registry.valid:
         return PositionEstimate(METHOD, STATUS_INVALID_REGISTRY, reason=registry.error)
-    if not reading_available:
-        return PositionEstimate(METHOD, STATUS_UNAVAILABLE, reason="leitura sem dado de rádio utilizável")
     if not global_cell_key:
         return PositionEstimate(METHOD, STATUS_MISSING_GLOBAL_CELL_KEY,
                                 reason="a servidora da leitura não tem global_cell_key (PLMN ou Cell-ID ausente)")

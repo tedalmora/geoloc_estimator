@@ -89,6 +89,8 @@ def test_wknn_com_snapshot_completo(monkeypatch, sem_espera, capsys, modelo):
     assert (r["metadata"]["n_observed_keys"], r["metadata"]["n_ignored_keys"]) == (len(usadas), 4 - len(usadas))
     assert driver._ser.written == ["AT#MONI", "AT#SERVINFO", "AT#CSURV", "AT$GPSACP"]  # só leituras
     assert not driver._ser.is_open
+    t = r["metadata"]["timings_s"]
+    assert set(t) == {"load_s", "estimate_s", "end_to_end_s"} and t["end_to_end_s"] >= t["load_s"] + t["estimate_s"]
 
 
 def test_wknn_com_snapshot_parcial_suficiente(monkeypatch, sem_espera, capsys, modelo):
@@ -139,7 +141,7 @@ def test_nenhuma_radio_key_compativel(monkeypatch, sem_espera, capsys, modelo, t
     bundle = modelo[1]
     outro = derivar(bundle, tmp_path, "outro.json", cell_keys=[f"LTE:9{i:03d}:1" for i in range(len(bundle["cell_keys"]))])
     codigo, r, _ = resultado(monkeypatch, sem_espera, capsys, leitura(), "wknn", "--port", "P", "--model", outro)
-    assert codigo == 1 and (r["status"], r["lat"], r["x_m"]) == ("unavailable", None, None)
+    assert codigo == 1 and (r["status"], r["lat"], r["x_m"]) == ("no_matching_radio_keys", None, None)
     assert "nenhuma radio_key do bundle" in r["reason"] and r["metadata"]["n_ignored_keys"] == len(CELULAS_LIDAS)
 
 
@@ -163,7 +165,7 @@ def test_conversao_enu_para_lat_lon(modelo):
     celulas = [CsurvCell(k, "LTE", CAMPAIGN_PLMN if status[k] == "campaign" else None, "CELL_SUITABLE", v)
                for k, v in zip(bundle["cell_keys"], vetor) if v != bundle["missing_value"]]
     est = WknnModel(bundle).predict(celulas)
-    iguais = [j for j, v in enumerate(fp["rsrp_dbm"]) if v == vetor][: bundle["n_neighbors"]]
+    iguais = [j for j, v in enumerate(fp["rsrp_dbm"]) if v == vetor]  # todas as amostras exatas, mesmo se forem mais que k
     x = sum(fp["x_m"][j] for j in iguais) / len(iguais)
     y = sum(fp["y_m"][j] for j in iguais) / len(iguais)
     assert est.metadata["zero_distance"] and (est.x_m, est.y_m) == pytest.approx((x, y))
@@ -178,7 +180,7 @@ def test_cell_id_com_cadastro_valido(monkeypatch, sem_espera, capsys, tmp_path):
     codigo, driver = rodar(monkeypatch, sem_espera, leitura(), "cell-id", "--port", "P", "--registry", cadastro(tmp_path))
     texto = capsys.readouterr().out
     assert codigo == 0 and "cell_id: valid -26.900000, -49.070000" in texto and "não do UE" in texto
-    assert "snapshot complete" in texto and not driver._ser.is_open
+    assert "snapshot complete" in texto and "ponta a ponta" in texto and not driver._ser.is_open
 
 
 def test_cell_id_celula_desconhecida(monkeypatch, sem_espera, capsys, tmp_path):
@@ -217,7 +219,7 @@ def test_so_wknn_e_cell_id_no_caminho_principal(metodo):
 
 def test_live_nao_importa_coletor_ta_lpp_nem_geometria_angular():
     codigo = ("import sys, estimador.live; print(sorted(m for m in sys.modules if m in ('coletor.daemon', 'hal.health', "
-              "'estimador.methods.network_position', 'estimador.methods.aoa', 'estimador.db') "
+              "'estimador.methods.network_position', 'estimador.methods.aoa') "
               "or m.startswith('experimental')))")
     saida = subprocess.run([sys.executable, "-c", codigo], capture_output=True, text=True, cwd=RAIZ, check=True)
     assert saida.stdout.strip() == "[]"

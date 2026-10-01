@@ -4,7 +4,7 @@ Cada subcomando executa só o comando AT correspondente e imprime a leitura em J
 chaves das células e resposta crua). Uso (a partir da pasta `codigo/`):
     python -m hal.cli --port /dev/ttyUSB2 alive
     python -m hal.cli --port /dev/ttyUSB2 status
-    python -m hal.cli --port /dev/ttyUSB2 prepare      # liga o GNSS só se estiver desligado
+    python -m hal.cli --port /dev/ttyUSB2 prepare      # ALTERA ESTADO: AT$GPSP=1 se o GNSS estiver parado
     python -m hal.cli --port /dev/ttyUSB2 moni         # célula servidora (AT#MONI)
     python -m hal.cli --port /dev/ttyUSB2 servinfo     # PLMN da servidora (AT#SERVINFO)
     python -m hal.cli --port /dev/ttyUSB2 csurv        # varredura (AT#CSURV, até 3 min)
@@ -32,7 +32,10 @@ def main() -> None:
     args = parser.parse_args()
 
     driver = FN990Driver()
-    driver.connect(args.port, baudrate=args.baudrate)
+    try:
+        driver.connect(args.port, baudrate=args.baudrate)
+    except OSError as exc:  # inclui ConnectionError e erros do pyserial
+        raise SystemExit(f"erro: FN990 indisponível: {exc}") from exc
     try:
         if args.comando == "alive":
             print("Vivo" if driver.is_alive() else "Sem resposta")
@@ -51,6 +54,8 @@ def main() -> None:
         elif args.comando == "reboot":
             driver.reboot()
             print("Comando de reboot enviado; a porta serial foi fechada localmente.")
+    except OSError as exc:
+        raise SystemExit(f"erro: falha na porta durante '{args.comando}': {exc}") from exc
     finally:
         if args.comando != "reboot":
             driver.close()

@@ -20,7 +20,7 @@ from typing import List, Optional, Tuple
 from acquisition.snapshot import Snapshot, utc_now_iso
 
 SCHEMA_VERSION = 2
-SCENARIOS = ("estatico", "pedestre", "veicular")
+SCENARIOS = ("estatico", "pedestre")
 ENVIRONMENTS = ("indoor", "outdoor")
 FINAL_SESSION_STATUSES = ("completed", "interrupted", "error")
 SOURCE_LEGACY_V1 = "LEGACY_V1"
@@ -271,6 +271,11 @@ def finish_session(conn: sqlite3.Connection, session_id: int, status: str, end_r
             "UPDATE sessions SET status = ?, ended_at = ?, end_reason = ? WHERE session_id = ?",
             (status, utc_now_iso(), end_reason, session_id),
         )
+
+
+def running_sessions(conn: sqlite3.Connection) -> List[int]:
+    """Sessões ainda 'running' (encerramento não registrado: SIGKILL, queda de energia ou execução em curso)."""
+    return [row[0] for row in conn.execute("SELECT session_id FROM sessions WHERE status = 'running' ORDER BY session_id")]
 
 
 def insert_health_check(

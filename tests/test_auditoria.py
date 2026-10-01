@@ -45,7 +45,7 @@ def test_B00_sintaxe_de_todos_os_modulos():
 MODULOS_AUDITORIA = [
     "hal.models", "hal.parsing", "hal.modem_driver", "hal.fn990_driver", "hal.health", "hal.cli",
     "coletor.db", "coletor.daemon", "coletor.export_csv", "estimador.dataset", "estimador.geometry",
-    "estimador.estimate", "estimador.features", "estimador.evaluate", "estimador.db",
+    "estimador.estimate", "estimador.features", "estimador.evaluate", "software_version",
     "estimador.methods.cell_id", "estimador.methods.fingerprint", "estimador.train", "estimador.live",
     "experimental.timing_advance", "experimental.angular_geometry", "experimental.lpp_probe",
 ]
@@ -373,7 +373,7 @@ def test_C08_sessao_encerrada_mesmo_com_excecao(monkeypatch, tmp_path, sem_esper
 
     monkeypatch.setattr(cd.db, "insert_snapshot", falha)
     banco = tmp_path / "c08.db"
-    with pytest.raises(sqlite3.OperationalError):
+    with pytest.raises(SystemExit, match="database is locked"):
         coletar_once(monkeypatch, banco, CICLO_LTE, sem_espera)
     ((status, fim, motivo),) = consulta(banco, "SELECT status, ended_at, end_reason FROM sessions")
     assert status == "error" and fim is not None and "OperationalError" in motivo

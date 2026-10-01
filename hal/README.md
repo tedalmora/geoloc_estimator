@@ -36,7 +36,7 @@ hexadecimal maiúsculo; o `#CSURV` os informa em decimal e o parser converte.
 | `send_at(cmd, timeout, drain_after)` | qualquer | `AtResponse` | prazo total; terminador `<CR>` |
 | `is_alive()` / `reconnect()` | `AT` | `bool` / — | health check |
 | `get_status()` | `+CGMI`, `+CGMM`, `+CGMR`, `+CGSN`, `+CPIN?`, `+CSQ`, `+COPS?`, `#UPTIME`, `#TEMPSENS` | `ModemStatus` | texto cru de cada comando |
-| `prepare_for_collection()` | `$GPSP?` e, só se desligado, `$GPSP=1` | `PrepareResult` | `$GPSP=1` apaga a memória do GNSS (manual p. 763) |
+| `prepare_for_collection()` | `$GPSP?` e, só se desligado, `$GPSP=1` | `PrepareResult` | **altera estado** quando envia `$GPSP=1`: liga o GNSS, apaga a memória GNSS e a configuração fica salva ("Setting saved: Other", manual p. 763) |
 | `read_serving_cell()` | `#MONI` | `MoniReading` | servidora LTE e/ou NR; NR_NSA só com `NR_STATE` = 2 |
 | `read_serving_info()` | `#SERVINFO` | `ServInfoReading` | traz o PLMN da servidora |
 | `scan_cells()` | `#CSURV` | `CsurvReading` | até 3 min; todas as células LTE/NR, inclusive de outras operadoras e `CELL_FORBIDDEN` |
@@ -44,9 +44,11 @@ hexadecimal maiúsculo; o `#CSURV` os informa em decimal e o parser converte.
 | `reboot()` | `#REBOOT` | — | **altera estado**: reinicia o modem e fecha a porta local |
 
 O `#MONI` e o `#SERVINFO` não informam o PCI da servidora LTE. `parsing.resolve_serving_cell()`
-(função pura) cruza o Cell-ID da servidora com os registros completos do `#CSURV`. Se houver
-exatamente um registro compatível, as duas chaves vêm desse registro. Caso contrário,
-`radio_key` fica vazia; o PCI não é adivinhado.
+(função pura) cruza o Cell-ID da servidora com os registros completos do `#CSURV`. Registros
+repetidos da mesma célula (mesma identidade; campo ausente não conta como conflito) valem como
+um só: as chaves vêm do registro mais completo, e a anomalia `registro_servidora_repetido_csurv`
+fica registrada. Se os candidatos divergirem em ARFCN, PCI, PLMN, Cell-ID ou TAC, a escolha é
+ambígua (`varios_registros_csurv`) e a `radio_key` fica vazia; o PCI não é adivinhado.
 
 ## O que o HAL não faz
 

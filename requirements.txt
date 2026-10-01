@@ -1,3 +1,3 @@
-# Runtime do alvo (Raspberry Pi): HAL, aquisição e Coletor usam só a biblioteca padrão + pyserial.
-# Dependências de desenvolvimento, testes e do Estimador legado ficam em requirements-dev.txt.
+# Runtime do alvo (Raspberry Pi): HAL, aquisição, Coletor e Estimador (Python puro) usam só a
+# biblioteca padrão + pyserial. requirements-dev.txt acrescenta só o pytest (PC de desenvolvimento).
 pyserial>=3.5

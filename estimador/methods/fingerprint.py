@@ -5,24 +5,29 @@ O bundle é JSON (formato aberto) e guarda os fingerprints em RSRP bruto (dBm, a
 `missing_value`); a padronização escolhida no treino é aplicada ao carregar. A estrutura
 exigida está em `REQUIRED_FIELDS` e é conferida por `validate_bundle` antes de qualquer inferência.
 
-Distância zero: se algum dos k vizinhos estiver a distância <= ZERO_DISTANCE_EPS do vetor
-consultado, a posição é a média simples desses vizinhos exatos (com peso 1/d, seria infinito).
+Distância zero: se alguma amostra estiver a distância <= ZERO_DISTANCE_EPS do vetor consultado,
+a posição é a média simples de TODAS essas amostras exatas, mesmo que sejam mais que k, sem peso
+inverso. Senão, valem os k vizinhos com peso 1/d. Empate na k-ésima distância: entra a amostra
+que vem antes no bundle (ordem crescente de measurement_id), regra determinística.
+Sem nenhuma radio_key do bundle na leitura, o estado é `no_matching_radio_keys`.
 Bundles antigos (.joblib/pickle, scikit-learn) são recusados sem abrir o conteúdo.
 """
-import heapq
 import json
 import math
 import os
 import re
+from itertools import takewhile
 from typing import List, Sequence, Tuple
 
-from ..estimate import STATUS_TECHNOLOGY_MISMATCH, STATUS_UNAVAILABLE, STATUS_VALID, PositionEstimate
+from ..estimate import STATUS_TECHNOLOGY_MISMATCH, STATUS_VALID, PositionEstimate
 from ..features import (SCALINGS, TECHNOLOGIES, CellFilterPolicy, apply_scaling, rsrp_by_key, validate_missing_value,
                         vectorize)
 from ..geometry import COORDINATE_SYSTEM, EnuFrame
 
+METHOD = "wknn"
 MODEL_TYPE = "wknn"
 MODEL_VERSION = 2
+STATUS_NO_MATCHING_RADIO_KEYS = "no_matching_radio_keys"
 DISTANCE_METRICS = ("L1", "L2")
 WEIGHTING = "inverse_distance"
 ZERO_DISTANCE_POLICY = "mean_of_exact_matches"
@@ -48,14 +53,18 @@ def distance(a: Sequence[float], b: Sequence[float], metric: str) -> float:
 
 
 def wknn_from_sorted(ordered: Sequence[Tuple[float, int]], xs: Sequence[float], ys: Sequence[float],
-                     k: int) -> Tuple[float, float, bool]:
-    """Posição WKNN a partir de (distância, índice) já ordenados; devolve (x, y, houve_distância_zero)."""
-    nearest = ordered[:k]
-    exact = [i for d, i in nearest if d <= ZERO_DISTANCE_EPS]
+                     k: int) -> Tuple[float, float, bool, List[int]]:
+    """Posição WKNN a partir de TODOS os (distância, índice) em ordem crescente.
+
+    Devolve (x, y, houve_distância_zero, índices usados): todas as amostras exatas, se houver; senão, os k primeiros.
+    """
+    exact = [i for _, i in takewhile(lambda pair: pair[0] <= ZERO_DISTANCE_EPS, ordered)]
     if exact:
-        return sum(xs[i] for i in exact) / len(exact), sum(ys[i] for i in exact) / len(exact), True
+        return sum(xs[i] for i in exact) / len(exact), sum(ys[i] for i in exact) / len(exact), True, exact
+    nearest = ordered[:k]
     total = sum(1.0 / d for d, _ in nearest)
-    return (sum(xs[i] / d for d, i in nearest) / total, sum(ys[i] / d for d, i in nearest) / total, False)
+    return (sum(xs[i] / d for d, i in nearest) / total, sum(ys[i] / d for d, i in nearest) / total, False,
+            [i for _, i in nearest])
 
 
 def _finite_number(value) -> bool:
@@ -142,26 +151,26 @@ class WknnModel:
 
     def predict_xy(self, raw_vector: Sequence[float]) -> Tuple[float, float, bool, List[int]]:
         query = apply_scaling(raw_vector, self.scaling)
-        ordered = heapq.nsmallest(self.k, ((distance(query, f, self.metric), i) for i, f in enumerate(self._vectors)))
-        x, y, zero = wknn_from_sorted(ordered, self._xs, self._ys, self.k)
-        return x, y, zero, [self._ids[i] for _, i in ordered]
+        ordered = sorted((distance(query, f, self.metric), i) for i, f in enumerate(self._vectors))
+        x, y, zero, used = wknn_from_sorted(ordered, self._xs, self._ys, self.k)
+        return x, y, zero, [self._ids[i] for i in used]
 
     def predict(self, cells) -> PositionEstimate:
         """Estima a posição a partir das células do #CSURV de uma leitura (mesmo formato do dataset).
         Células fora do vocabulário são ignoradas e só contadas; o bundle não muda."""
         if not any(c.rat == self.technology for c in cells):
-            return PositionEstimate("wknn", STATUS_TECHNOLOGY_MISMATCH, technology=self.technology,
+            return PositionEstimate(METHOD, STATUS_TECHNOLOGY_MISMATCH, technology=self.technology,
                                     reason=f"a leitura não tem células {self.technology} do #CSURV")
         vector, n_observed = vectorize(cells, self.policy, self.cell_keys, self.missing_value)
         n_ignored = len(set(rsrp_by_key(cells, self.policy)) - self._key_set)
         if n_observed == 0:
-            return PositionEstimate("wknn", STATUS_UNAVAILABLE, technology=self.technology,
+            return PositionEstimate(METHOD, STATUS_NO_MATCHING_RADIO_KEYS, technology=self.technology,
                                     reason="nenhuma radio_key do bundle foi observada na leitura",
                                     metadata={"n_observed_keys": 0, "n_ignored_keys": n_ignored})
         x, y, zero, neighbors = self.predict_xy(vector)
         lat, lon, _ = self.frame.to_geodetic(x, y)
         return PositionEstimate(
-            "wknn", STATUS_VALID, lat=lat, lon=lon, x_m=x, y_m=y, technology=self.technology,
+            METHOD, STATUS_VALID, lat=lat, lon=lon, x_m=x, y_m=y, technology=self.technology,
             metadata={"n_observed_keys": n_observed, "n_ignored_keys": n_ignored, "n_neighbors": self.k,
                       "distance_metric": self.metric, "zero_distance": zero, "neighbor_measurement_ids": neighbors},
         )

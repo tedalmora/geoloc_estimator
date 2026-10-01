@@ -7,10 +7,14 @@ Uso (a partir de `codigo/`):
 O export gera 1 CSV por tabela (reference_points, sessions, measurements, observed_cells,
 health_checks) e um metadata.json com versão do schema, colunas, número de linhas e SHA-256 de
 cada CSV. NULL vira \\N, para não se confundir com texto vazio. O banco de origem é aberto
-somente leitura, e a pasta de saída precisa estar vazia ou não existir.
+somente leitura, e a pasta de saída precisa estar vazia ou não existir. Todas as tabelas são
+lidas numa única transação de leitura: o export representa um só estado do banco, mesmo com o
+Coletor gravando (no modo WAL a leitura não bloqueia a gravação). Os hashes e o metadata.json
+só são gerados depois que essa transação termina.
 
-A restauração cria um banco v2 NOVO (recusa arquivo existente), confere SHA-256, colunas e
-contagens e mantém os IDs originais. Se algo falhar, o arquivo parcial é removido.
+A restauração cria um banco v2 NOVO (recusa arquivo existente), aceita só os arquivos
+`<tabela>.csv` da própria pasta do export, confere SHA-256, colunas e contagens e mantém os IDs
+originais, com foreign keys ligadas. Se algo falhar, o arquivo parcial é removido.
 """
 import argparse
 import csv
@@ -40,31 +44,48 @@ def export(db_path: str, out_dir: str) -> dict:
         raise FileExistsError(f"{out_dir}: a pasta de saída já tem arquivos; use uma pasta nova.")
     conn = db.open_read_only(db_path)
     try:
-        version, _ = db.schema_info(conn)
+        conn.execute("BEGIN")
+        version, _ = db.schema_info(conn)  # primeira leitura: fixa o estado lido por todo o export
+        exported_at = utc_now_iso()
         if version != db.SCHEMA_VERSION:
             raise db.SchemaError(f"{db_path}: export completo só para o schema v{db.SCHEMA_VERSION} (encontrado v{version}).")
         os.makedirs(out_dir, exist_ok=True)
-        meta = {
-            "schema_version": db.SCHEMA_VERSION, "exported_at": utc_now_iso(),
-            "source_db": os.path.basename(db_path), "null_marker": NULL, "tables": {},
-        }
+        tables = {}
         for table in db.TABLES:
             cur = conn.execute(f"SELECT * FROM {table} ORDER BY 1")
             columns = [d[0] for d in cur.description]
-            path = os.path.join(out_dir, f"{table}.csv")
             rows = 0
-            with open(path, "w", newline="", encoding="utf-8") as f:
+            with open(os.path.join(out_dir, f"{table}.csv"), "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 writer.writerow(columns)
                 for row in cur:
                     writer.writerow([NULL if value is None else value for value in row])
                     rows += 1
-            meta["tables"][table] = {"file": f"{table}.csv", "columns": columns, "rows": rows, "sha256": sha256_file(path)}
+            tables[table] = {"file": f"{table}.csv", "columns": columns, "rows": rows}
+        conn.rollback()  # fim da transação de leitura; nada foi alterado
     finally:
         conn.close()
+    for info in tables.values():
+        info["sha256"] = sha256_file(os.path.join(out_dir, info["file"]))
+    meta = {
+        "schema_version": db.SCHEMA_VERSION, "exported_at": exported_at,
+        "source_db": os.path.basename(db_path), "null_marker": NULL, "tables": tables,
+    }
     with open(os.path.join(out_dir, METADATA_FILE), "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
     return meta
+
+
+def _table_file(src_dir: str, table: str, info) -> str:
+    """Caminho do CSV da tabela: só `<tabela>.csv` dentro da pasta do export."""
+    expected = f"{table}.csv"
+    name = info.get("file") if isinstance(info, dict) else None
+    if name != expected:
+        raise ValueError(f"metadata.json: o arquivo de {table} precisa ser {expected!r} (recebido {name!r}).")
+    path = os.path.join(src_dir, expected)
+    if os.path.dirname(os.path.realpath(path)) != os.path.realpath(src_dir):
+        raise ValueError(f"{expected}: aponta para fora da pasta do export.")
+    return path
 
 
 def _converter(declared_type: str):
@@ -83,10 +104,12 @@ def restore(src_dir: str, db_path: str) -> dict:
         meta = json.load(f)
     if meta.get("schema_version") != db.SCHEMA_VERSION:
         raise db.SchemaError(f"export do schema v{meta.get('schema_version')}; este código restaura v{db.SCHEMA_VERSION}.")
+    if not isinstance(meta.get("tables"), dict) or set(meta["tables"]) != set(db.TABLES):
+        raise ValueError(f"metadata.json: as tabelas precisam ser exatamente {', '.join(db.TABLES)}.")
+    paths = {table: _table_file(src_dir, table, meta["tables"][table]) for table in db.TABLES}
     for table in db.TABLES:
-        info = meta["tables"][table]
-        if sha256_file(os.path.join(src_dir, info["file"])) != info["sha256"]:
-            raise ValueError(f"{info['file']}: SHA-256 não confere com o metadata.json (arquivo alterado).")
+        if sha256_file(paths[table]) != meta["tables"][table].get("sha256"):
+            raise ValueError(f"{table}.csv: SHA-256 não confere com o metadata.json (arquivo alterado).")
 
     conn = db.connect(db_path)
     try:
@@ -94,7 +117,7 @@ def restore(src_dir: str, db_path: str) -> dict:
             for table in db.TABLES:
                 info = meta["tables"][table]
                 types = {r[1]: _converter(r[2]) for r in conn.execute(f"PRAGMA table_info({table})")}
-                with open(os.path.join(src_dir, info["file"]), newline="", encoding="utf-8") as f:
+                with open(paths[table], newline="", encoding="utf-8") as f:
                     reader = csv.reader(f)
                     header = next(reader)
                     if header != info["columns"] or set(header) != set(types):
@@ -110,7 +133,7 @@ def restore(src_dir: str, db_path: str) -> dict:
                     f"INSERT INTO {table} ({', '.join(header)}) VALUES ({', '.join('?' * len(header))})", rows
                 )
         counts = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in db.TABLES}
-    except (sqlite3.Error, ValueError):
+    except (sqlite3.Error, ValueError, csv.Error):
         conn.close()
         for suffix in ("", "-wal", "-shm"):
             if os.path.exists(db_path + suffix):
@@ -138,7 +161,7 @@ def main(argv=None) -> None:
         else:
             for table, rows in restore(args.src, args.db).items():
                 print(f"{table}: {rows} linhas restauradas")
-    except (db.SchemaError, FileExistsError, FileNotFoundError, ValueError) as exc:
+    except (db.SchemaError, OSError, ValueError, sqlite3.Error, csv.Error) as exc:
         raise SystemExit(f"erro: {exc}") from exc
 
 

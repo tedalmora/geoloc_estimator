@@ -439,17 +439,39 @@ def parse_gpsp(resp: AtResponse) -> Optional[int]:
 
 
 # ---------------------------------------------------------------- célula servidora
+_IDENTITY_FIELDS = ("rat", "arfcn", "pci", "plmn", "cell_id", "tac")
+
+
+def _serving_candidate(matches, anomalies: List[str]):
+    """Registro do #CSURV que identifica a servidora, entre os candidatos (índice, observação).
+
+    Cópias do mesmo registro (identidade igual, ou só com campos ausentes em alguma) contam como
+    um: fica a mais completa e a repetição vira anomalia. Valores diferentes num campo de
+    identidade (ARFCN, PCI, PLMN, Cell-ID ou TAC) tornam a escolha ambígua: devolve None.
+    """
+    if len(matches) > 1:
+        conflicts = [f for f in _IDENTITY_FIELDS if len({getattr(o, f) for _, o in matches} - {None}) > 1]
+        if conflicts:
+            anomalies.append(f"varios_registros_csurv:{len(matches)}:{','.join(conflicts)}")
+            return None
+        anomalies.append(f"registro_servidora_repetido_csurv:{len(matches)}")
+    if not matches:
+        return None
+    return max(matches, key=lambda m: sum(getattr(m[1], f) is not None for f in _IDENTITY_FIELDS))
+
+
 def resolve_serving_cell(
     moni: Optional[MoniReading], servinfo: Optional[ServInfoReading], csurv: Sequence[CellObservation]
 ) -> ServingCellResolution:
     """Identidade da célula servidora por cruzamento entre #MONI, #SERVINFO e #CSURV (função pura).
 
     LTE (e âncora do NR_NSA): #MONI e #SERVINFO dão Cell-ID, EARFCN e TAC, mas não o PCI. O PCI
-    vem do único registro LTE do #CSURV com o mesmo Cell-ID (e mesmo PLMN/EARFCN, quando
-    conhecidos). Em campo, a célula F560E67 (EARFCN 3375, TAC 87BB) apareceu 2 vezes no #CSURV
-    como cellId 257298023, phyCellId 254. Sem registro único, a radio_key fica vazia: o PCI não
-    é adivinhado. A global_cell_key vem do registro do #CSURV que casou ou, sem ele, do
-    #SERVINFO (que traz o PLMN) ou do #MONI no formato com Cc/Nc.
+    vem do registro LTE do #CSURV com o mesmo Cell-ID (e mesmo PLMN/EARFCN, quando conhecidos).
+    Em campo, a célula F560E67 (EARFCN 3375, TAC 87BB) apareceu 2 vezes no #CSURV como cellId
+    257298023, phyCellId 254: cópias do mesmo registro contam como um (anomalia
+    registro_servidora_repetido_csurv). Registros com PCI, PLMN ou TAC diferentes tornam a
+    servidora ambígua, e a radio_key fica vazia: o PCI não é adivinhado. A global_cell_key vem do
+    registro do #CSURV escolhido ou, sem ele, do #SERVINFO (que traz o PLMN) ou do #MONI com Cc/Nc.
     NR_SA: o #MONI já traz NR_CH e NR_PCI (radio_key); o Cell-ID (NCI) só vem do #CSURV.
     """
     anomalies: List[str] = []
@@ -476,14 +498,13 @@ def resolve_serving_cell(
         )
         matches = [(i, o) for i, o in enumerate(csurv)
                    if o.rat == RAT_NR and nr.radio_key and o.radio_key == nr.radio_key]
-        if len(matches) == 1:
-            i, obs = matches[0]
+        chosen = _serving_candidate(matches, anomalies)
+        if chosen is not None:
+            i, obs = chosen
             result.csurv_index, result.cell_id, result.tac = i, obs.cell_id, obs.tac
             result.plmn = obs.plmn or result.plmn
             if obs.global_cell_key:
                 result.global_cell_key, result.global_key_source = obs.global_cell_key, SOURCE_CSURV
-        elif len(matches) > 1:
-            anomalies.append(f"varios_registros_csurv:{len(matches)}")
         result.anomalies = anomalies
         return result
 
@@ -515,8 +536,9 @@ def resolve_serving_cell(
             and (plmn is None or o.plmn is None or o.plmn == plmn)
             and (arfcn is None or o.arfcn == arfcn)
         ]
-        if len(matches) == 1:
-            i, obs = matches[0]
+        chosen = _serving_candidate(matches, anomalies)
+        if chosen is not None:
+            i, obs = chosen
             result.method, result.csurv_index, result.pci = "csurv", i, obs.pci
             result.radio_key = obs.radio_key
             result.radio_key_source = SOURCE_CSURV if obs.radio_key else None
@@ -525,9 +547,8 @@ def resolve_serving_cell(
                 result.global_cell_key, result.global_key_source = obs.global_cell_key, SOURCE_CSURV
             if tac and obs.tac and tac != obs.tac:
                 anomalies.append("tac_divergente_csurv")
-        elif len(matches) > 1:
+        elif matches:
             result.method = "ambiguous"
-            anomalies.append(f"varios_registros_csurv:{len(matches)}")
     if result.global_cell_key is None:
         for obs, source in ((servinfo_lte, SOURCE_SERVINFO), (moni_lte, SOURCE_MONI)):
             if obs is not None and obs.global_cell_key:

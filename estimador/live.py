@@ -7,7 +7,7 @@
 4. snapshot `invalid` não gera estimativa; `partial` só é usado se tiver o que o método exige
    (WKNN: #CSURV lido; Cell-ID: global_cell_key da servidora) e fica registrado em snapshot_status;
 5. estima com WKNN (methods/fingerprint.py) ou Cell-ID (methods/cell_id.py);
-6. mostra o resultado (texto, ou JSON com --json);
+6. mostra o resultado e os tempos (carga, leitura, estimativa e ponta a ponta), em texto ou JSON;
 7. fecha a conexão.
 
 Não grava banco, não repete leituras, não liga o GNSS nem altera configuração do modem e não usa
@@ -24,32 +24,24 @@ import sys
 import time
 from typing import Optional
 
-from acquisition.snapshot import SNAPSHOT_INVALID, Snapshot, take_snapshot
+from acquisition.snapshot import Snapshot, take_snapshot
 from hal.fn990_driver import FN990Driver
-from hal.models import READ_OK
 
-from .estimate import STATUS_UNAVAILABLE, PositionEstimate
+from .estimate import PositionEstimate, unavailable_reading
 from .features import cells_from_observations
 from .methods.cell_id import METHOD as CELL_ID, CellRegistry, estimate_cell_id, load_registry
-from .methods.fingerprint import BundleError, WknnModel, load_bundle
+from .methods.fingerprint import METHOD as WKNN, BundleError, WknnModel, load_bundle
 
 
 def estimate_from_snapshot(snapshot: Snapshot, model: Optional[WknnModel] = None,
                            registry: Optional[CellRegistry] = None) -> PositionEstimate:
     """WKNN (com `model`) ou Cell-ID (com `registry`) sobre 1 snapshot; nunca devolve None."""
-    if snapshot.status == SNAPSHOT_INVALID:
-        estimate = PositionEstimate("wknn" if model else CELL_ID, STATUS_UNAVAILABLE,
-                                    reason="snapshot inválido: " + ", ".join(snapshot.reasons or ["sem observações"]),
-                                    technology=model.technology if model else None)
-    elif model is not None:
-        if snapshot.csurv.status != READ_OK:
-            estimate = PositionEstimate("wknn", STATUS_UNAVAILABLE, technology=model.technology,
-                                        reason=f"#CSURV sem dado nesta leitura (csurv:{snapshot.csurv.status}); "
-                                               "o WKNN usa só células do #CSURV")
-        else:
-            estimate = model.predict(cells_from_observations(snapshot.observations))
-    else:
-        estimate = estimate_cell_id(registry, snapshot.serving.global_cell_key)
+    estimate = unavailable_reading(WKNN if model else CELL_ID, snapshot.status, snapshot.csurv.status,
+                                   model.technology if model else None,
+                                   detail=", ".join(snapshot.reasons or ["sem observações"]))
+    if estimate is None:
+        estimate = (model.predict(cells_from_observations(snapshot.observations)) if model
+                    else estimate_cell_id(registry, snapshot.serving.global_cell_key))
     estimate.snapshot_status = snapshot.status
     estimate.metadata["snapshot"] = {
         "started_at": snapshot.started_at, "reasons": snapshot.reasons, "access_mode": snapshot.access_mode,
@@ -64,8 +56,12 @@ def _print_text(estimate: PositionEstimate) -> None:
     reasons = f"; motivos: {', '.join(snap['reasons'])}" if snap["reasons"] else ""
     print(f"Leitura {snap['started_at']}: snapshot {estimate.snapshot_status}{reasons}; acesso {snap['access_mode']}; "
           f"servidora {snap['serving_global_cell_key'] or '-'}; {snap['timings_s'].get('total', 0.0):.1f} s")
+    t = estimate.metadata["timings_s"]
+    timings = (f"  tempos: carga {t['load_s']:.3f} s; estimativa {1000 * t['estimate_s']:.1f} ms; "
+               f"ponta a ponta {t['end_to_end_s']:.1f} s")
     if not estimate.valid:
         print(f"{estimate.method}: {estimate.status} -- {estimate.reason}")
+        print(timings)
         return
     print(f"{estimate.method}: valid {estimate.lat:.6f}, {estimate.lon:.6f}")
     if estimate.x_m is not None:
@@ -73,6 +69,7 @@ def _print_text(estimate: PositionEstimate) -> None:
               f"{estimate.metadata['n_observed_keys']} radio_keys usadas, {estimate.metadata['n_ignored_keys']} ignoradas")
     else:
         print(f"  {estimate.metadata['position']}")
+    print(timings)
 
 
 def main(argv=None) -> int:
@@ -89,7 +86,7 @@ def main(argv=None) -> int:
         p.add_argument("--json", action="store_true", help="resultado completo em JSON")
     args = parser.parse_args(argv)
 
-    start = time.perf_counter()
+    t0 = start = time.perf_counter()
     model = registry = None
     if args.method == "wknn":
         try:
@@ -114,6 +111,7 @@ def main(argv=None) -> int:
     start = time.perf_counter()
     estimate = estimate_from_snapshot(snapshot, model, registry)
     timings["estimate_s"] = time.perf_counter() - start
+    timings["end_to_end_s"] = time.perf_counter() - t0  # carga + conexão + leitura + estimativa
     estimate.metadata["timings_s"] = timings
     if args.json:
         print(json.dumps(estimate.to_dict(), indent=2, ensure_ascii=False))

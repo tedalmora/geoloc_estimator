@@ -321,10 +321,55 @@ def test_servidora_sem_registro_no_csurv_nao_adivinha_pci():
     assert (r.global_cell_key, r.global_key_source) == ("LTE:72406:F560E67", "SERVINFO")
 
 
-def test_servidora_com_dois_registros_candidatos_e_ambigua():
-    lte = next(o for o in csurv("csurv_vivo_campo.txt").observations if o.rat == "LTE")
-    r = resolve_serving_cell(parse_moni(resposta("AT#MONI", "moni_lte.txt")), None, [lte, dataclasses.replace(lte, pci=31)])
-    assert (r.method, r.radio_key) == ("ambiguous", None)
+def _lte_de_campo():
+    return next(o for o in csurv("csurv_vivo_campo.txt").observations if o.rat == "LTE")
+
+
+def _servidora(*candidatos):
+    return resolve_serving_cell(parse_moni(resposta("AT#MONI", "moni_lte.txt")),
+                                parse_servinfo(resposta("AT#SERVINFO", "servinfo_lte.txt")), list(candidatos))
+
+
+def test_servidora_com_um_unico_candidato():
+    r = _servidora(_lte_de_campo())
+    assert (r.method, r.radio_key, r.global_cell_key, r.csurv_index) == ("csurv", "LTE:3375:254", "LTE:72406:F560E67", 0)
+    assert not [a for a in r.anomalies if "registro" in a]
+
+
+def test_copias_identicas_da_servidora_nao_tornam_a_escolha_ambigua():
+    lte = _lte_de_campo()
+    for copia in (lte, dataclasses.replace(lte, rsrp_dbm=-110.0)):  # mesma identidade; só a medida pode mudar
+        r = _servidora(lte, copia)
+        assert (r.method, r.radio_key, r.global_cell_key, r.csurv_index) == (
+            "csurv", "LTE:3375:254", "LTE:72406:F560E67", 0)
+        assert "registro_servidora_repetido_csurv:2" in r.anomalies
+
+
+def test_copia_com_campo_ausente_nao_conflita_e_vale_a_mais_completa():
+    lte = _lte_de_campo()
+    r = _servidora(dataclasses.replace(lte, tac=None), lte)
+    assert (r.method, r.radio_key, r.csurv_index) == ("csurv", "LTE:3375:254", 1)
+
+
+def test_mesmo_cell_id_com_radio_keys_diferentes_e_ambiguo():
+    lte = _lte_de_campo()
+    r = _servidora(lte, dataclasses.replace(lte, pci=31))
+    assert (r.method, r.radio_key, r.pci, r.csurv_index) == ("ambiguous", None, None, None)
+    assert "varios_registros_csurv:2:pci" in r.anomalies
+    assert (r.global_cell_key, r.global_key_source) == ("LTE:72406:F560E67", "SERVINFO")
+
+
+def test_candidatos_com_informacao_conflitante_sao_ambiguos():
+    lte = _lte_de_campo()
+    r = _servidora(lte, dataclasses.replace(lte, tac="ABCD"))
+    assert (r.method, r.radio_key) == ("ambiguous", None) and "varios_registros_csurv:2:tac" in r.anomalies
+
+
+def test_nr_sa_com_registro_repetido_usa_a_chave_global_do_csurv():
+    nr = CellObservation(rat="NR", source="CSURV", arfcn=629952, pci=123, plmn="72406", cell_id="3053A189", tac="1")
+    r = resolve_serving_cell(parse_moni(resposta("AT#MONI", "moni_nr_sa.txt")), None, [nr, nr])
+    assert (r.radio_key, r.global_cell_key, r.csurv_index) == ("NR:629952:123", "NR:72406:3053A189", 0)
+    assert "registro_servidora_repetido_csurv:2" in r.anomalies
 
 
 def test_servidora_que_mudou_entre_comandos_ignora_servinfo():

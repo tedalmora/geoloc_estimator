@@ -7,7 +7,7 @@ import sqlite3
 
 import pytest
 
-from support import at_lines, driver_com
+from support import ScriptedSerial, at_lines, driver_com
 
 import coletor.daemon as cd
 import coletor.db as cdb
@@ -15,6 +15,7 @@ from acquisition.snapshot import take_snapshot
 from coletor import export_csv, migrate
 from hal.models import AtResponse
 from hal.parsing import parse_moni
+from software_version import software_version
 
 CICLO = {
     "AT": ["AT", "OK"],
@@ -149,6 +150,7 @@ def test_once_grava_sessao_completa(monkeypatch, tmp_path, capsys, sem_espera):
         banco, "SELECT status, mode, reference_point_id, route, campaign_plmn, metadata_json FROM sessions")
     assert (status, modo, ponto, rota, plmn) == ("completed", "once", 1, None, None)
     assert json.loads(metadata)["prepare"]["gnss_power_before"] == 1 and "imei" not in metadata.lower()
+    assert json.loads(metadata)["software_version"] == software_version()
 
 
 def test_continuous_ate_o_limite_com_grade_e_saude(monkeypatch, tmp_path, sem_espera):
@@ -170,7 +172,9 @@ def test_tentativa_invalida_tambem_vira_linha(monkeypatch, tmp_path, sem_espera)
     assert [e for (e,) in linhas(banco, "SELECT event FROM health_checks ORDER BY health_check_id")] == ["start", "failure", "end"]
 
 
-def test_reconexao_apos_tres_falhas_seguidas(monkeypatch, tmp_path, sem_espera):
+def test_reconexao_real_fecha_e_reabre_a_porta_apos_tres_falhas(monkeypatch, tmp_path, sem_espera):
+    import hal.fn990_driver as fd
+
     banco = str(tmp_path / "c.db")
     chamadas = {"moni": 0}
 
@@ -180,17 +184,78 @@ def test_reconexao_apos_tres_falhas_seguidas(monkeypatch, tmp_path, sem_espera):
             raise OSError("porta caiu")
         return at_lines("moni_lte.txt")
 
-    driver = driver_com(dict(CICLO, **{"AT#MONI": moni}), sem_espera)
-    reconexoes = []
-    driver.reconnect = lambda: reconexoes.append(1)
-    monkeypatch.setattr(cd, "_open_modem", lambda args: driver)
+    roteiro = {cmd: at_lines(v) if isinstance(v, str) else v for cmd, v in dict(CICLO, **{"AT#MONI": moni}).items()}
+    portas = []
+
+    def abrir(porta, baudrate, timeout):
+        portas.append(ScriptedSerial(roteiro, clock=sem_espera))
+        return portas[-1]
+
+    monkeypatch.setattr(fd.serial, "Serial", abrir)
     cd.main(["continuous", "--port", "P", "--db", banco, *SESSAO_ROTA, "--interval", "0",
              "--health-interval", "1000", "--max-measurements", "5"])
-    assert reconexoes == [1]
+    assert len(portas) == 2 and not portas[0].is_open and not portas[1].is_open
+    assert portas[1].written[:2] == ["AT", "AT$GPSP?"]  # handshake e prepare na porta reaberta
     assert [s for (s,) in linhas(banco, "SELECT snapshot_status FROM measurements ORDER BY seq")] == [
         "invalid", "invalid", "invalid", "complete", "complete"]
     assert [e for (e,) in linhas(banco, "SELECT event FROM health_checks ORDER BY health_check_id")] == [
         "start", "failure", "reconnect_ok", "recovered", "end"]
+
+
+def test_sigterm_no_once_encerra_a_sessao_como_interrompida(monkeypatch, tmp_path, sem_espera):
+    banco = str(tmp_path / "c.db")
+    capturado = {}
+
+    class Parada(cd._StopFlag):
+        def __init__(self):
+            super().__init__()
+            capturado["flag"] = self
+
+    def csurv():
+        capturado["flag"](signal.SIGTERM, None)  # o sinal chega durante o #CSURV (sem sinal real ao processo)
+        return at_lines("csurv_vivo_campo.txt")
+
+    monkeypatch.setattr(cd, "_StopFlag", Parada)
+    antes = signal.getsignal(signal.SIGTERM)
+    driver = rodar(monkeypatch, dict(CICLO, **{"AT#CSURV": csurv}), sem_espera, "once", "--port", "P", "--db", banco,
+                   *SESSAO_PONTO)
+    assert linhas(banco, "SELECT status, end_reason, ended_at IS NOT NULL FROM sessions") == [
+        ("interrupted", "sinal SIGTERM", 1)]
+    assert linhas(banco, "SELECT COUNT(*) FROM measurements") == [(1,)]  # o ciclo em andamento foi gravado inteiro
+    assert linhas(banco, "SELECT COUNT(*) FROM observed_cells")[0][0] == 4
+    assert [e for (e,) in linhas(banco, "SELECT event FROM health_checks ORDER BY health_check_id")] == ["start", "end"]
+    assert not driver._ser.is_open and signal.getsignal(signal.SIGTERM) is antes
+
+
+def test_sinal_antes_do_inicio_nao_cria_sessao(monkeypatch, tmp_path, sem_espera):
+    banco = str(tmp_path / "c.db")
+    capturado = {}
+
+    class Parada(cd._StopFlag):
+        def __init__(self):
+            super().__init__()
+            capturado["flag"] = self
+
+    def gpsp():
+        capturado["flag"](signal.SIGINT, None)
+        return at_lines("gpsp_ligado.txt")
+
+    monkeypatch.setattr(cd, "_StopFlag", Parada)
+    driver = rodar(monkeypatch, dict(CICLO, **{"AT$GPSP?": gpsp}), sem_espera, "once", "--port", "P", "--db", banco,
+                   *SESSAO_PONTO)
+    assert linhas(banco, "SELECT COUNT(*) FROM sessions") == [(0,)] and not driver._ser.is_open
+
+
+def test_sessao_deixada_running_e_avisada_sem_alteracao(monkeypatch, tmp_path, capsys, sem_espera):
+    banco = str(tmp_path / "c.db")
+    conn = cdb.connect(banco)
+    orfa = cdb.create_session(conn, mode="continuous", scenario="estatico", environment="outdoor", modem_id="fn990",
+                              metadata={}, route="r1")
+    conn.close()  # como depois de um SIGKILL: a sessão fica running
+    rodar(monkeypatch, CICLO, sem_espera, "once", "--port", "P", "--db", banco, *SESSAO_PONTO)
+    assert f"sessão(ões) {orfa} ainda 'running'" in capsys.readouterr().out
+    assert linhas(banco, "SELECT session_id, status FROM sessions ORDER BY session_id") == [
+        (orfa, "running"), (orfa + 1, "completed")]
 
 
 def test_sinal_interrompe_depois_do_ciclo_e_restaura_handlers(monkeypatch, tmp_path, sem_espera):
@@ -218,7 +283,7 @@ def test_sinal_interrompe_depois_do_ciclo_e_restaura_handlers(monkeypatch, tmp_p
 def test_ctrl_c_no_once_encerra_sessao_como_interrompida(monkeypatch, tmp_path, sem_espera):
     banco = str(tmp_path / "c.db")
 
-    def ctrl_c():
+    def ctrl_c():  # KeyboardInterrupt chega quando não há tratador instalado (fora da thread principal)
         raise KeyboardInterrupt
 
     rodar(monkeypatch, dict(CICLO, **{"AT#MONI": ctrl_c}), sem_espera, "once", "--port", "P", "--db", banco, *SESSAO_PONTO)
@@ -238,6 +303,9 @@ def test_ponto_ou_rota_e_obrigatorio_e_exclusivo():
         cd.build_parser().parse_args(base)
     with pytest.raises(SystemExit):
         cd.build_parser().parse_args(base + ["--reference-point", "P01", "--route", "r1"])
+    with pytest.raises(SystemExit):  # cenário veicular está fora do escopo
+        cd.build_parser().parse_args(["once", "--port", "P", "--db", "x.db", "--scenario", "veicular",
+                                      "--environment", "outdoor", "--route", "r1"])
 
 
 def test_point_add_e_point_list(tmp_path, capsys):
@@ -314,6 +382,54 @@ def test_export_recusa_pasta_com_arquivos_e_banco_v1(banco_com_dados, tmp_path):
         export_csv.export(banco_com_dados, str(pasta))
     with pytest.raises(cdb.SchemaError):
         export_csv.export(banco_v1(tmp_path / "v1.db"), str(tmp_path / "export_v1"))
+
+
+def test_export_e_um_estado_unico_mesmo_com_gravacao_concorrente(banco_com_dados, tmp_path, monkeypatch):
+    antes = {t: linhas(banco_com_dados, f"SELECT COUNT(*) FROM {t}")[0][0] for t in cdb.TABLES}
+    original = export_csv.csv.writer
+    chamadas = []
+
+    def writer_com_gravacao_no_meio(*args, **kwargs):
+        chamadas.append(1)
+        if len(chamadas) == 3:  # sessions.csv pronto, measurements.csv come\u00e7ando: o Coletor grava agora
+            conn = cdb.connect(banco_com_dados)
+            sid = cdb.create_session(conn, mode="once", scenario="estatico", environment="outdoor", modem_id="fn990",
+                                     metadata={}, route="concorrente")
+            cdb.insert_health_check(conn, sid, "fn990", "start", True)
+            conn.close()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(export_csv.csv, "writer", writer_com_gravacao_no_meio)
+    pasta = tmp_path / "export"
+    meta = export_csv.export(banco_com_dados, str(pasta))
+    assert linhas(banco_com_dados, "SELECT COUNT(*) FROM sessions") == [(antes["sessions"] + 1,)]
+    assert {t: info["rows"] for t, info in meta["tables"].items()} == antes
+    novo = str(tmp_path / "restaurado.db")
+    export_csv.restore(str(pasta), novo)  # foreign keys ligadas: um export misturado falharia aqui
+    assert {t: linhas(novo, f"SELECT COUNT(*) FROM {t}")[0][0] for t in cdb.TABLES} == antes
+
+
+@pytest.mark.parametrize("arquivo", ["../sessions.csv", "sub/sessions.csv", "measurements.csv", "ABSOLUTO"])
+def test_restore_so_aceita_o_csv_da_tabela_na_pasta_do_export(banco_com_dados, tmp_path, arquivo):
+    pasta = tmp_path / "export"
+    export_csv.export(banco_com_dados, str(pasta))
+    meta = json.loads((pasta / "metadata.json").read_text(encoding="utf-8"))
+    meta["tables"]["sessions"]["file"] = str(tmp_path / "sessions.csv") if arquivo == "ABSOLUTO" else arquivo
+    (pasta / "metadata.json").write_text(json.dumps(meta), encoding="utf-8")
+    with pytest.raises(SystemExit, match="sessions.csv"):
+        export_csv.main(["restore", "--from", str(pasta), "--db", str(tmp_path / "novo.db")])
+    assert not (tmp_path / "novo.db").exists()
+
+
+def test_restore_recusa_manifesto_com_tabelas_diferentes(banco_com_dados, tmp_path):
+    pasta = tmp_path / "export"
+    export_csv.export(banco_com_dados, str(pasta))
+    meta = json.loads((pasta / "metadata.json").read_text(encoding="utf-8"))
+    meta["tables"].pop("health_checks")
+    (pasta / "metadata.json").write_text(json.dumps(meta), encoding="utf-8")
+    with pytest.raises(ValueError, match="tabelas"):
+        export_csv.restore(str(pasta), str(tmp_path / "novo.db"))
+    assert not (tmp_path / "novo.db").exists()
 
 
 # --------------------------------------------------------------------------- migração v1 -> v2

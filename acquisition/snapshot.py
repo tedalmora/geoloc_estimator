@@ -151,7 +151,10 @@ def main() -> None:
     args = parser.parse_args()
 
     driver = FN990Driver()
-    driver.connect(args.port, baudrate=args.baudrate)
+    try:
+        driver.connect(args.port, baudrate=args.baudrate)
+    except OSError as exc:  # inclui ConnectionError e erros do pyserial
+        raise SystemExit(f"erro: FN990 indisponível: {exc}") from exc
     try:
         saida = {}
         if args.prepare:

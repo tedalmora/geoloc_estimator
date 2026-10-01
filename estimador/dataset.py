@@ -6,19 +6,24 @@
 - As células de cada amostra vêm só do #CSURV. Valores do #MONI/#SERVINFO não entram nem
   substituem os do #CSURV. RSRP 0 (não coletado na varredura) vira ausente.
 - Referência posicional, em ordem de prioridade:
-  1. coordenada cadastrada do ponto de referência;
-  2. mediana das leituras GNSS do ponto (mínimo `MIN_GNSS_FOR_MEDIAN`), com a dispersão;
+  1. coordenada cadastrada do ponto de referência (a única tratada como referência final);
+  2. mediana das leituras GNSS do ponto (mínimo `MIN_GNSS_FOR_MEDIAN`), com a dispersão e o
+     número de sessões que contribuíram (mais de uma = referência compartilhada entre sessões);
   3. leitura GNSS isolada da própria medição, só com `allow_single_gnss` (dado auxiliar).
+  As opções 2 e 3 são referências exploratórias.
+- Além das amostras elegíveis, o dataset guarda todas as tentativas não migradas (`attempts`),
+  com o motivo de exclusão, para a cobertura operacional dos métodos.
 - Protocolos de divisão (não equivalentes; cada resultado informa o seu):
   `spatial` agrupa por reference_point_id e `temporal` por session_id. Não há divisão
-  aleatória por linha.
+  aleatória por linha. Mínimo técnico: 1 grupo de teste e 3 de seleção, com ao menos 2 grupos
+  de treino em cada fold; isso não garante um resultado estável.
 """
 import hashlib
 import json
 import random
 import statistics
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from coletor.db import SCHEMA_VERSION, open_read_only, schema_info
@@ -34,8 +39,12 @@ REF_REGISTERED = "reference_point"
 REF_GNSS_MEDIAN = "gnss_point_median"
 REF_GNSS_SINGLE = "gnss_single"
 MIN_GNSS_FOR_MEDIAN = 3
-MIN_GROUPS = 3  # 1 grupo de teste + 2 para a seleção por validação
+MIN_SELECTION_GROUPS = 3  # cada fold precisa de ao menos 2 grupos de treino e 1 de validação
+MIN_GROUPS = 1 + MIN_SELECTION_GROUPS
 VALID_FIX_TYPES = (2, 3)
+POINT_KNOWN = "known_points"  # ponto com amostras no treino: generalização temporal
+POINT_NEW = "new_points"  # ponto sem amostras no treino: extrapolação espacial
+POINT_NONE = "no_point"  # rota, sem ponto de referência
 
 
 class DatasetError(RuntimeError):
@@ -69,6 +78,12 @@ class ReferencePosition:
     uncertainty_m: Optional[float] = None  # incerteza declarada no cadastro do ponto
     dispersion_m: Optional[float] = None  # mediana da distância das leituras GNSS até a mediana
     n_gnss: int = 0
+    n_sessions: int = 0  # sessões que contribuíram com fixes GNSS (> 1 = referência compartilhada)
+
+    @property
+    def shared_between_sessions(self) -> bool:
+        """Mediana GNSS com fixes de mais de uma sessão (no temporal, inclusive de treino e de teste)."""
+        return self.source == REF_GNSS_MEDIAN and self.n_sessions > 1
 
 
 @dataclass(frozen=True)
@@ -83,6 +98,28 @@ class Sample:
     serving_global_cell_key: Optional[str]
     cells: Tuple[CsurvCell, ...]
     reference: ReferencePosition
+    environment: Optional[str] = None
+
+    def group(self, protocol: str) -> Optional[int]:
+        return self.reference_point_id if protocol == PROTOCOL_SPATIAL else self.session_id
+
+
+@dataclass(frozen=True)
+class Attempt:
+    """Tentativa de leitura (linha não migrada de `measurements`), elegível ou não para o dataset.
+
+    Base da cobertura operacional. `exclusion` diz por que não é amostra (None = amostra elegível).
+    """
+    measurement_id: int
+    session_id: int
+    reference_point_id: Optional[int]
+    environment: Optional[str]
+    snapshot_status: str
+    csurv_status: str
+    serving_global_cell_key: Optional[str]
+    cells: Tuple[CsurvCell, ...]
+    reference: Optional[ReferencePosition]
+    exclusion: Optional[str]
 
     def group(self, protocol: str) -> Optional[int]:
         return self.reference_point_id if protocol == PROTOCOL_SPATIAL else self.session_id
@@ -95,11 +132,13 @@ class Dataset:
     excluded: Dict[str, int]
     allow_single_gnss: bool
     min_gnss_for_median: int
+    attempts: List[Attempt] = field(default_factory=list)
 
     def summary(self) -> dict:
         return {
             "source_db": self.source,
             "n_samples": len(self.samples),
+            "n_attempts": len(self.attempts),
             "excluded": dict(sorted(self.excluded.items())),
             "reference_sources": dict(sorted(Counter(s.reference.source for s in self.samples).items())),
             "access_modes": dict(sorted(Counter(s.access_mode for s in self.samples).items())),
@@ -148,8 +187,8 @@ def load_dataset(db_path: str, allow_single_gnss: bool = False, min_gnss_for_med
     try:
         rows = conn.execute(
             "SELECT m.measurement_id, m.session_id, m.reference_point_id, m.started_at, s.started_at, m.access_mode, "
-            "s.campaign_plmn, m.serving_global_cell_key, m.snapshot_status, m.csurv_status, m.legacy_ambiguous, "
-            "m.gnss_status, m.gnss_lat, m.gnss_lon, m.gnss_fix_type "
+            "s.campaign_plmn, s.environment, m.serving_global_cell_key, m.snapshot_status, m.csurv_status, "
+            "m.legacy_ambiguous, m.gnss_status, m.gnss_lat, m.gnss_lon, m.gnss_fix_type "
             "FROM measurements m JOIN sessions s ON s.session_id = m.session_id ORDER BY m.measurement_id"
         ).fetchall()
         cells_by_measurement: Dict[int, List[CsurvCell]] = {}
@@ -164,11 +203,11 @@ def load_dataset(db_path: str, allow_single_gnss: bool = False, min_gnss_for_med
     finally:
         conn.close()
 
-    fixes_by_point: Dict[int, List[Tuple[float, float]]] = {}
+    fixes_by_point: Dict[int, List[Tuple[float, float, int]]] = {}
     for row in rows:
-        _, _, pid, *_, legacy, gnss_status, lat, lon, fix_type = row
+        _, sid, pid, *_, legacy, gnss_status, lat, lon, fix_type = row
         if pid is not None and not legacy and gnss_status == "ok" and fix_type in VALID_FIX_TYPES and lat is not None:
-            fixes_by_point.setdefault(pid, []).append((lat, lon))
+            fixes_by_point.setdefault(pid, []).append((lat, lon, sid))
 
     point_reference: Dict[int, ReferencePosition] = {}
     for pid, lat, lon, coord_source, uncertainty in points:
@@ -180,38 +219,42 @@ def load_dataset(db_path: str, allow_single_gnss: bool = False, min_gnss_for_med
             mlat = statistics.median(f[0] for f in fixes)
             mlon = statistics.median(f[1] for f in fixes)
             dispersion = statistics.median(haversine_m(mlat, mlon, f[0], f[1]) for f in fixes)
-            point_reference[pid] = ReferencePosition(mlat, mlon, REF_GNSS_MEDIAN, dispersion_m=dispersion, n_gnss=len(fixes))
+            point_reference[pid] = ReferencePosition(mlat, mlon, REF_GNSS_MEDIAN, dispersion_m=dispersion,
+                                                     n_gnss=len(fixes), n_sessions=len({f[2] for f in fixes}))
 
     excluded: Counter = Counter()
     samples: List[Sample] = []
-    for (mid, sid, pid, started_at, session_started_at, access_mode, campaign_plmn, global_key, snapshot_status,
-         csurv_status, legacy, gnss_status, lat, lon, fix_type) in rows:
+    attempts: List[Attempt] = []
+    for (mid, sid, pid, started_at, session_started_at, access_mode, campaign_plmn, environment, global_key,
+         snapshot_status, csurv_status, legacy, gnss_status, lat, lon, fix_type) in rows:
         if legacy:
             excluded["legacy_ambiguous"] += 1
             continue
-        if snapshot_status == "invalid":
-            excluded["snapshot_invalid"] += 1
-            continue
-        if csurv_status != "ok":
-            excluded["csurv_indisponivel"] += 1
-            continue
         cells = tuple(cells_by_measurement.get(mid, ()))
-        if not cells:
-            excluded["sem_celulas_csurv"] += 1
-            continue
         if pid is not None:
             reference = point_reference.get(pid)
-            if reference is None:
-                excluded["ponto_sem_referencia"] += 1
-                continue
         elif allow_single_gnss and gnss_status == "ok" and fix_type in VALID_FIX_TYPES and lat is not None:
-            reference = ReferencePosition(lat, lon, REF_GNSS_SINGLE, n_gnss=1)
+            reference = ReferencePosition(lat, lon, REF_GNSS_SINGLE, n_gnss=1, n_sessions=1)
         else:
-            excluded["rota_sem_referencia_permitida"] += 1
+            reference = None
+        if snapshot_status == "invalid":
+            exclusion = "snapshot_invalid"
+        elif csurv_status != "ok":
+            exclusion = "csurv_indisponivel"
+        elif not cells:
+            exclusion = "sem_celulas_csurv"
+        elif reference is None:
+            exclusion = "ponto_sem_referencia" if pid is not None else "rota_sem_referencia_permitida"
+        else:
+            exclusion = None
+        attempts.append(Attempt(mid, sid, pid, environment, snapshot_status, csurv_status, global_key, cells, reference,
+                                exclusion))
+        if exclusion is not None:
+            excluded[exclusion] += 1
             continue
         samples.append(Sample(mid, sid, pid, started_at, session_started_at, access_mode, campaign_plmn, global_key,
-                              cells, reference))
-    return Dataset(db_path, samples, dict(excluded), allow_single_gnss, min_gnss_for_median)
+                              cells, reference, environment))
+    return Dataset(db_path, samples, dict(excluded), allow_single_gnss, min_gnss_for_median, attempts)
 
 
 def resolve_campaign_plmn(samples: Sequence[Sample], requested: Optional[str]) -> str:
@@ -246,12 +289,12 @@ class GroupSplit:
 
 def make_group_split(
     samples: Sequence[Sample], protocol: str, test_fraction: float = 0.2, n_folds: int = 5, seed: int = 42,
-    min_groups: int = MIN_GROUPS,
 ) -> GroupSplit:
     """Reserva grupos inteiros para o teste final e divide os demais em folds de seleção.
 
     spatial: grupos de teste sorteados com `seed`. temporal: as sessões mais recentes ficam no
-    teste. Os folds distribuem os grupos de seleção equilibrando o número de amostras.
+    teste. Os folds distribuem os grupos de seleção equilibrando o número de amostras. Fold com
+    menos de 2 grupos de treino encerra com insufficient_groups (sem seleção com 1 grupo).
     """
     if protocol not in PROTOCOLS:
         raise ValueError(f"protocolo desconhecido: {protocol!r}")
@@ -260,13 +303,14 @@ def make_group_split(
     sizes = Counter(s.group(protocol) for s in samples if s.group(protocol) is not None)
     ungrouped = sum(1 for s in samples if s.group(protocol) is None)
     groups = sorted(sizes)
-    if len(groups) < min_groups:
+    if len(groups) < MIN_GROUPS:
         raise DatasetError(
             f"{protocol}_validation_unavailable",
-            f"insufficient_groups: {len(groups)} grupo(s) com amostras rotuladas ({GROUP_COLUMN[protocol]}); "
-            f"mínimo {min_groups} (1 para teste e 2 para seleção). Não há divisão aleatória por linha como alternativa.",
+            f"insufficient_groups: {len(groups)} grupo(s) com amostras rotuladas ({GROUP_COLUMN[protocol]}); mínimo "
+            f"técnico {MIN_GROUPS} (1 para teste e {MIN_SELECTION_GROUPS} para seleção, com ao menos 2 grupos de treino "
+            "em cada fold). Não há divisão aleatória por linha como alternativa.",
         )
-    n_test = min(max(1, round(test_fraction * len(groups))), len(groups) - 2)
+    n_test = min(max(1, round(test_fraction * len(groups))), len(groups) - MIN_SELECTION_GROUPS)
     if protocol == PROTOCOL_SPATIAL:
         shuffled = list(groups)
         random.Random(seed).shuffle(shuffled)
@@ -283,6 +327,13 @@ def make_group_split(
         members[i].append(g)
         loads[i] += sizes[g]
     folds = tuple((tuple(g for g in selection if g not in m), tuple(sorted(m))) for m in members)
+    short = [i + 1 for i, (train, validation) in enumerate(folds) if len(train) < 2 or not validation]
+    if short:
+        raise DatasetError(
+            f"{protocol}_validation_unavailable",
+            f"insufficient_groups: fold(s) {short} sem 2 grupos de treino e 1 de validação; use mais folds (--folds) "
+            "ou colete mais grupos.",
+        )
     return GroupSplit(protocol, tuple(test), tuple(selection), folds, ungrouped)
 
 
@@ -294,3 +345,82 @@ def samples_in_groups(samples: Sequence[Sample], protocol: str, groups: Sequence
 def group_sizes(samples: Sequence[Sample], protocol: str, groups: Sequence[int]) -> Dict[str, int]:
     counts = Counter(s.group(protocol) for s in samples_in_groups(samples, protocol, groups))
     return {str(g): counts[g] for g in sorted(counts)}
+
+
+# ---------------------------------------------------------------- relatório da divisão e da referência
+def describe(items) -> dict:
+    """Pontos, sessões e amostras de um subconjunto (amostras ou tentativas)."""
+    return {"samples": len(items),
+            "points": len({it.reference_point_id for it in items if it.reference_point_id is not None}),
+            "sessions": len({it.session_id for it in items})}
+
+
+def split_report(samples: Sequence[Sample], split: GroupSplit) -> dict:
+    """Grupos, pontos, sessões e amostras do teste, da seleção e de cada fold (treino e validação)."""
+    def part(groups):
+        return {"groups": len(groups), **describe(samples_in_groups(samples, split.protocol, groups))}
+    return {"test": part(split.test_groups), "selection": part(split.selection_groups),
+            "folds": [{"train": part(train), "validation": part(validation)} for train, validation in split.folds]}
+
+
+def split_warnings(protocol: str, test_groups: Sequence[int], fold_train_sizes: Sequence[int] = ()) -> List[str]:
+    """Avisos de variância alta. Não há número universal de grupos suficientes: só os mínimos são avisados."""
+    warnings = []
+    if len(test_groups) == 1:
+        warnings.append(f"o teste tem um único grupo ({GROUP_COLUMN[protocol]} {test_groups[0]}): o erro de teste "
+                        "depende de um só ponto ou sessão e tem variância alta")
+    if any(n == 2 for n in fold_train_sizes):
+        warnings.append("há fold com só 2 grupos de treino (o mínimo aceito): a seleção por validação tem variância alta")
+    return warnings
+
+
+def point_type(item, known_points) -> str:
+    """known_points (ponto com amostras no treino), new_points (ponto novo) ou no_point (rota)."""
+    if item.reference_point_id is None:
+        return POINT_NONE
+    return POINT_KNOWN if item.reference_point_id in known_points else POINT_NEW
+
+
+def split_by_point_type(items, known_points) -> Dict[str, list]:
+    groups: Dict[str, list] = {}
+    for item in items:
+        groups.setdefault(point_type(item, known_points), []).append(item)
+    return groups
+
+
+def point_type_warnings(items, known_points, protocol: str) -> List[str]:
+    """No protocolo temporal, pontos do teste sem amostras no treino são extrapolação espacial."""
+    new = sorted({it.reference_point_id for it in items if point_type(it, known_points) == POINT_NEW})
+    if protocol != PROTOCOL_TEMPORAL or not new:
+        return []
+    return [f"pontos {new} do teste temporal não têm amostras no treino: extrapolação espacial, relatada à parte "
+            f"({POINT_NEW}), separada da generalização temporal ({POINT_KNOWN})"]
+
+
+def reference_summary(items) -> dict:
+    """Origem das referências e se o resultado pode ser tratado como final ou só exploratório."""
+    refs = [it.reference for it in items if it.reference is not None]
+    if not refs:
+        status = "sem_referencia"
+    else:
+        status = "final" if all(r.source == REF_REGISTERED for r in refs) else "exploratoria"
+    return {
+        "status": status,
+        "sources": dict(sorted(Counter(r.source for r in refs).items())),
+        "gnss_median_shared_points": sorted({it.reference_point_id for it in items
+                                             if it.reference is not None and it.reference.shared_between_sessions}),
+        "max_dispersion_m": max((r.dispersion_m for r in refs if r.dispersion_m is not None), default=None),
+    }
+
+
+def reference_warnings(items, protocol: Optional[str] = None) -> List[str]:
+    summary = reference_summary(items)
+    warnings = []
+    if summary["status"] == "exploratoria":
+        n = sum(1 for it in items if it.reference is not None and it.reference.source != REF_REGISTERED)
+        warnings.append(f"referência exploratória: {n} leitura(s) avaliada(s) usam mediana GNSS ou GNSS isolado; para "
+                        "resultados finais, cadastre coordenadas levantadas dos pontos (coletor.daemon point-add)")
+    if protocol == PROTOCOL_TEMPORAL and summary["gnss_median_shared_points"]:
+        warnings.append(f"pontos {summary['gnss_median_shared_points']}: a referência combina fixes GNSS de várias "
+                        "sessões (inclusive de treino e de teste); o resultado temporal não tem independência temporal completa")
+    return warnings

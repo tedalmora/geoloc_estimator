@@ -29,3 +29,18 @@ class PositionEstimate:
         return {"method": self.method, "valid": self.valid, "status": self.status, "reason": self.reason,
                 "x_m": self.x_m, "y_m": self.y_m, "lat": self.lat, "lon": self.lon, "technology": self.technology,
                 "snapshot_status": self.snapshot_status, "metadata": self.metadata}
+
+
+def unavailable_reading(method: str, snapshot_status: str, csurv_status: Optional[str] = None,
+                        technology: Optional[str] = None, detail: str = "") -> Optional[PositionEstimate]:
+    """`unavailable` quando a leitura não serve ao método; senão None. Mesma regra no live.py e no evaluate.
+
+    Snapshot inválido não gera estimativa; o WKNN ("wknn") também exige o #CSURV lido.
+    """
+    if snapshot_status == "invalid":
+        return PositionEstimate(method, STATUS_UNAVAILABLE, technology=technology,
+                                reason="snapshot inválido" + (f": {detail}" if detail else ""))
+    if method == "wknn" and csurv_status != "ok":
+        return PositionEstimate(method, STATUS_UNAVAILABLE, technology=technology,
+                                reason=f"#CSURV sem dado nesta leitura (csurv:{csurv_status}); o WKNN usa só células do #CSURV")
+    return None

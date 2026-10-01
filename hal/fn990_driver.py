@@ -5,11 +5,14 @@ Comandos conferidos no AT+CLAC do modem (planejamento/comandosModem.txt) e no ma
 hal/parsing.py; aqui ficam só o transporte AT e a ordem dos comandos.
 
 Regras de segurança do driver:
-- nenhum comando grava configuração persistente. Em particular, não há escrita de AT$LCSLPP
-  ("Setting saved: Auto", manual p. 740); o HAL não trata LPP (a consulta experimental, só
-  leitura, fica em experimental/lpp_probe.py);
-- AT$GPSP=1 só é enviado se AT$GPSP? disser que o GNSS está desligado, porque ele também
-  apaga a memória do GNSS (manual p. 763);
+- nenhum comando com configuração salva automaticamente. Em particular, não há escrita de
+  AT$LCSLPP ("Setting saved: Auto", manual p. 740); o HAL não trata LPP (a consulta experimental,
+  só leitura, fica em experimental/lpp_probe.py);
+- prepare_for_collection() ALTERA O ESTADO do GNSS: envia AT$GPSP=1 só se AT$GPSP? disser que a
+  sessão GNSS está parada, porque o comando também apaga a memória do GNSS (manual p. 763, que
+  classifica a configuração como "Setting saved: Other", fora do perfil comum). Executam o
+  prepare: `hal.cli prepare`, `acquisition.snapshot` sem --no-prepare e `coletor.daemon
+  once/continuous` (no início da sessão e depois de cada reconexão);
 - o #MONI não é reconfigurado: se ficou em modo de célula adjacente, a leitura vem 'malformed'.
 """
 import time

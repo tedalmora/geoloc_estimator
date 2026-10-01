@@ -1,6 +1,7 @@
 """Estimador: leitura do radiomapa v2 e divisões por grupo (spatial e temporal)."""
 import dataclasses
 import sqlite3
+from collections import Counter
 
 import pytest
 
@@ -14,9 +15,15 @@ from estimador.dataset import (
     DatasetError,
     load_dataset,
     make_group_split,
+    point_type_warnings,
+    reference_summary,
+    reference_warnings,
     resolve_campaign_plmn,
     samples_in_groups,
     samples_sha256,
+    split_by_point_type,
+    split_report,
+    split_warnings,
 )
 from estimador.geometry import haversine_m
 
@@ -44,6 +51,11 @@ def test_dataset_le_so_v2_sem_alterar_e_exclui_linhas_inadequadas(radiomapa):
     assert ds.excluded == {"legacy_ambiguous": 1, "snapshot_invalid": 1, "csurv_indisponivel": 1,
                            "rota_sem_referencia_permitida": 3}
     assert info_json(caminho) == antes
+    # tentativas: tudo menos a linha migrada, com o motivo de exclusão (base da cobertura operacional)
+    assert len(ds.attempts) == ds.summary()["n_attempts"] == 59
+    assert Counter(a.exclusion for a in ds.attempts) == {None: 54, "snapshot_invalid": 1, "csurv_indisponivel": 1,
+                                                         "rota_sem_referencia_permitida": 3}
+    assert {s.environment for s in ds.samples} == {"outdoor"}
 
 
 def test_banco_v1_e_recusado_com_instrucao_de_migracao(tmp_path):
@@ -66,6 +78,7 @@ def test_prioridade_da_referencia_posicional(radiomapa):
     assert (cadastrada.coord_source, cadastrada.uncertainty_m) == ("sintetico", 0.5)
     mediana = por_fonte[REF_GNSS_MEDIAN].reference
     assert mediana.n_gnss == 9 and 0 < mediana.dispersion_m < 6
+    assert mediana.n_sessions == 3 and mediana.shared_between_sessions and not cadastrada.shared_between_sessions
     assert haversine_m(mediana.lat, mediana.lon, *verdade["P5"]) < 4
     assert REF_GNSS_SINGLE not in por_fonte
     com_rota = load_dataset(caminho, allow_single_gnss=True)
@@ -146,13 +159,60 @@ def test_divisao_temporal_reserva_as_sessoes_mais_recentes(radiomapa):
 
 
 def test_grupos_insuficientes_encerram_sem_divisao_por_linha(tmp_path):
-    caminho = tmp_path / "pequeno.db"
-    criar_radiomapa(caminho, dias=1, pontos={"P1": (-60, -60, True), "P2": (60, 60, True)}, extras=False)
+    for nome, pontos in (("dois", {"P1": (-60, -60, True), "P2": (60, 60, True)}),
+                         ("tres", {"P1": (-60, -60, True), "P2": (60, 60, True), "P3": (0, -60, True)})):
+        caminho = tmp_path / f"{nome}.db"
+        criar_radiomapa(caminho, dias=1, pontos=pontos, extras=False)
+        amostras = load_dataset(str(caminho)).samples
+        with pytest.raises(DatasetError, match="spatial_validation_unavailable: insufficient_groups"):
+            make_group_split(amostras, "spatial")
+        with pytest.raises(DatasetError, match="temporal_validation_unavailable: insufficient_groups"):
+            make_group_split(amostras, "temporal")
+
+
+def test_fold_com_um_unico_grupo_de_treino_e_recusado(tmp_path):
+    caminho = tmp_path / "quatro.db"
+    criar_radiomapa(caminho, dias=1, pontos={"P1": (-60, -60, True), "P2": (60, 60, True), "P3": (0, -60, True),
+                                             "P4": (-60, 60, True)}, extras=False)
     amostras = load_dataset(str(caminho)).samples
-    with pytest.raises(DatasetError, match="spatial_validation_unavailable: insufficient_groups"):
-        make_group_split(amostras, "spatial")
-    with pytest.raises(DatasetError, match="temporal_validation_unavailable: insufficient_groups"):
-        make_group_split(amostras, "temporal")
+    with pytest.raises(DatasetError, match=r"insufficient_groups: fold\(s\) \[1\] sem 2 grupos de treino"):
+        make_group_split(amostras, "spatial", n_folds=2)  # 3 grupos de seleção em 2 folds: um treina com 1 grupo
+    split = make_group_split(amostras, "spatial")  # mínimo técnico: 3 folds com 2 grupos de treino cada
+    assert [len(treino) for treino, _ in split.folds] == [2, 2, 2]
+    avisos = split_warnings("spatial", split.test_groups, [len(treino) for treino, _ in split.folds])
+    assert len(avisos) == 2 and "único grupo" in avisos[0] and "variância alta" in avisos[1]
+
+
+def test_relatorio_da_divisao_conta_grupos_pontos_sessoes_e_amostras(radiomapa):
+    caminho, _ = radiomapa
+    amostras = load_dataset(caminho).samples
+    split = make_group_split(amostras, "spatial")
+    relatorio = split_report(amostras, split)
+    assert relatorio["test"] == {"groups": 1, "points": 1, "sessions": 3, "samples": 9}
+    assert relatorio["selection"] == {"groups": 5, "points": 5, "sessions": 15, "samples": 45}
+    assert [f["train"]["groups"] for f in relatorio["folds"]] == [4] * 5
+    assert all(f["validation"] == {"groups": 1, "points": 1, "sessions": 3, "samples": 9} for f in relatorio["folds"])
+    assert split_warnings("spatial", split.test_groups, [4] * 5) == [
+        f"o teste tem um único grupo (reference_point_id {split.test_groups[0]}): o erro de teste depende de um só "
+        "ponto ou sessão e tem variância alta"]
+
+
+def test_referencia_exploratoria_compartilhada_e_tipos_de_ponto(radiomapa):
+    caminho, _ = radiomapa
+    amostras = load_dataset(caminho).samples
+    cadastradas = [s for s in amostras if s.reference.source == REF_REGISTERED]
+    assert reference_summary(cadastradas)["status"] == "final" and reference_warnings(cadastradas, "temporal") == []
+    resumo = reference_summary(amostras)
+    assert (resumo["status"], resumo["gnss_median_shared_points"]) == ("exploratoria", [5])
+    assert 0 < resumo["max_dispersion_m"] < 6
+    avisos = reference_warnings(amostras, "temporal")
+    assert len(avisos) == 2 and "cadastre coordenadas" in avisos[0] and "independência temporal completa" in avisos[1]
+    assert len(reference_warnings(amostras, "spatial")) == 1
+    assert reference_summary([])["status"] == "sem_referencia"
+    tipos = split_by_point_type(amostras, {1, 2})
+    assert {k: len(v) for k, v in tipos.items()} == {"known_points": 18, "new_points": 36}
+    assert point_type_warnings(amostras, {1, 2}, "spatial") == []
+    assert "pontos [3, 4, 5, 6]" in point_type_warnings(amostras, {1, 2}, "temporal")[0]
 
 
 def test_rotas_ficam_fora_do_protocolo_spatial(radiomapa):

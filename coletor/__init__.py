@@ -1,4 +1,4 @@
-"""Pacote Coletor -- o daemon que usa o HAL em loop e grava as leituras no SQLite.
+"""Pacote Coletor -- sessões de coleta: grava os snapshots da aquisição compartilhada no SQLite (schema v2).
 
-Ver planejamento/arquitetura_coleta_dados.md para as decisões de arquitetura por trás deste pacote.
+Comandos, banco, backup e migração: coletor/README.md.
 """
