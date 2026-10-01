@@ -16,8 +16,8 @@ se o banco mudou, recusa. WKNN e Cell-ID são avaliados nas mesmas amostras, e a
 protocolo (spatial ou temporal) e a coluna de grupo: resultados de protocolos diferentes não são
 equivalentes.
 cell-id: confronta o cadastro com todas as amostras rotuladas, com o erro por célula servidora.
-live: resumo por método do que `estimador.live` gravou em position_estimates (no modo `once`,
-cada linha já é a média de N leituras).
+live: resumo por método de bancos position_estimates gravados pelo `estimador.live` até a fase 5
+(no antigo modo `once`, cada linha já é a média de N leituras); o live.py atual não grava.
 """
 import argparse
 import csv
@@ -232,7 +232,7 @@ def main(argv=None) -> None:
                    help="inclui rotas com leitura GNSS isolada como referência")
     p.add_argument("--out", help="CSV com o erro por célula servidora")
     p.add_argument("--json-out", dest="json_out")
-    p = sub.add_parser("live", help="resumo por método do que estimador.live gravou")
+    p = sub.add_parser("live", help="resumo de bancos position_estimates gravados pelo live.py até a fase 5")
     p.add_argument("--db", default="estimador_estimativas.db")
     p.add_argument("--out", help="CSV com o resumo por método")
     args = parser.parse_args(argv)

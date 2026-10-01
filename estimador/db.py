@@ -1,11 +1,11 @@
-"""Banco SQLite PRÓPRIO do Estimador -- guarda as ESTIMATIVAS de posição de estimador/live.py
-(modos `once` E `continuous`). Não tem nada a ver com o radiomapa do Coletor: são arquivos e
-tabelas diferentes de propósito, para não misturar "dado histórico de treino" com "resultado
-de posição ao vivo".
+"""Banco SQLite das estimativas gravadas pelo estimador/live.py até a fase 5 (position_estimates).
 
-`lat_real`/`lon_real`/`erro_m` só vêm preenchidos quando havia um jeito de saber a posição
-real na hora da medição (GNSS do próprio modem, ou `--gnss-real` informado na mão) -- é isso
-que permite comparar os métodos depois, com `python -m estimador.evaluate live`.
+O live.py atual (modo once) não grava neste banco. O módulo fica só para descrever o formato
+dos arquivos já existentes, que `python -m estimador.evaluate live` lê em modo somente leitura.
+Não tem nada a ver com o radiomapa do Coletor.
+
+`lat_real`/`lon_real`/`erro_m` só vêm preenchidos quando havia posição real conhecida na hora
+da medição (GNSS do modem ou `--gnss-real` do live.py antigo).
 """
 import sqlite3
 import time

@@ -1,7 +1,6 @@
 """Cell-ID por global_cell_key com cadastro validado (Fase 5, commit 4)."""
 import json
 import os
-import sys
 
 import pytest
 
@@ -121,7 +120,6 @@ def test_live_recusa_cadastro_invalido_antes_de_abrir_o_modem(tmp_path, monkeypa
 
     monkeypatch.setattr(live, "FN990Driver", nao_conectar)
     caminho = gravar(tmp_path, {"254": {"lat": -26.9, "lon": -49.07}})
-    monkeypatch.setattr(sys, "argv", ["live", "once", "--metodos", "cell_id", "--fn990-port", "X", "--registry", caminho])
-    with pytest.raises(SystemExit):
-        live.main()
-    assert "invalid_registry" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as saida:
+        live.main(["cell-id", "--port", "X", "--registry", caminho])
+    assert saida.value.code == 2 and "invalid_registry" in capsys.readouterr().err

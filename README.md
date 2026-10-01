@@ -14,13 +14,13 @@ sozinho e qual tipo de geolocalização ele serve:
 ```
 codigo/
     hal/              # biblioteca on-demand (fala com o modem, sob demanda -- não é daemon)
-        health.py             # monitor de saúde da conexão -- usado pelo Coletor E pelo estimador/live.py
+        health.py             # monitor de saúde da conexão -- usado pelo Coletor
     acquisition/      # aquisição compartilhada: 1 snapshot (MONI, SERVINFO, CSURV, GNSS) com status e motivos
     coletor/          # o daemon de campanha de campo (grava snapshots no SQLite)
     estimador/        # Cell-ID + WKNN: OFFLINE (train.py, evaluate.py) e ONLINE (live.py); detalhes no README dele
         network_registry.example.json  # modelo do cadastro de células (por global_cell_key) -- copie e preencha
-        live.py                # ONLINE -- mede a posição agora, 1+ métodos ao mesmo tempo, sem depender do Coletor
-        db.py                   # SQLite próprio (position_estimates) -- o que live.py salva
+        live.py                # ONLINE -- 1 leitura do modem -> 1 estimativa (wknn ou cell-id), sem depender do Coletor
+        db.py                   # formato do banco position_estimates do live.py antigo (só leitura, evaluate live)
         methods/
             cell_id.py            # Cell-ID por global_cell_key + validação do cadastro (baseline)
             fingerprint.py        # Fingerprinting WKNN (Python puro, bundle JSON) -- único com treino
@@ -43,7 +43,7 @@ flowchart LR
     DB -- "treino/avaliação (offline)" --> TREINO["estimador/train.py\nestimador/evaluate.py"]
     TREINO -. "bundle WKNN .json" .-> LIVE
     HAL -- "chamada síncrona" --> LIVE["estimador/live.py\nmedição ao vivo (online)"]
-    LIVE --> POS["posição estimada\n(once ou continuous)"]
+    LIVE --> POS["posição estimada\n(1 leitura, modo once)"]
 ```
 
 O HAL não sabe que o Coletor ou o `live.py` existem (só responde quando chamado). O Coletor
@@ -55,10 +55,10 @@ responder "onde estou agora".
 
 | Método | Situação | Precisa do radiomapa? | Como usar |
 |---|---|---|---|
-| Cell-ID (`global_cell_key` → posição cadastrada da célula) | principal (baseline) | Para avaliar, sim | `estimador.live`; `estimador.evaluate cell-id`/`compare` |
-| Fingerprinting WKNN | principal | **Sim** | `estimador.train` (offline), `estimador.evaluate compare`, `estimador.live` |
-| Cell-ID + Timing Advance | legado, fase 7 | Não | `estimador.live` -- **hoje igual ao Cell-ID**: o firmware atual não expõe TA (ver `hal/README.md`) |
-| DL-AoD / UL-AoA | legado, fase 7 | Não | `estimador.live` -- os ângulos ainda são digitados (ver `hal/README.md`) |
+| Cell-ID (`global_cell_key` → posição cadastrada da célula) | principal (baseline) | Para avaliar, sim | `estimador.live cell-id`; `estimador.evaluate cell-id`/`compare` |
+| Fingerprinting WKNN | principal | **Sim** | `estimador.train` (offline), `estimador.evaluate compare`, `estimador.live wknn` |
+| Cell-ID + Timing Advance | legado, fase 7 | Não | fora do `live.py`; o firmware atual não expõe TA (ver `hal/README.md`) |
+| DL-AoD / UL-AoA | legado, fase 7 | Não | fora do `live.py`; não há ângulos medidos (ver `hal/README.md`) |
 
 ---
 
@@ -258,16 +258,9 @@ python -m estimador.evaluate compare --db radiomapa_v2.db --model modelos/wknn_l
     --registry estimador/network_registry.json --out resumo_spatial.csv
 python -m estimador.evaluate cell-id --db radiomapa_v2.db --registry estimador/network_registry.json
 
-# medir agora, sem depender do Coletor (once: N leituras; continuous: até Ctrl+C)
-python -m estimador.live once --metodos cell_id,fingerprint --fn990-port /dev/ttyUSB2 \
-    --registry estimador/network_registry.json --fingerprint-modelo modelos/wknn_lte_spatial.json
-python -m estimador.live continuous --metodos cell_id,fingerprint --interval 5 --fn990-port /dev/ttyUSB2 \
-    --registry estimador/network_registry.json --fingerprint-modelo modelos/wknn_lte_spatial.json \
-    --db estimador_estimativas.db
-# --gnss-real lat,lon (opcional): posição verdadeira na hora, para gravar o erro
-
-# resumo do que foi medido ao vivo
-python -m estimador.evaluate live --db estimador_estimativas.db
+# estimar a posição agora com 1 leitura do FN990, sem depender do Coletor (--json: resultado completo)
+python -m estimador.live wknn --port /dev/ttyUSB2 --model modelos/wknn_lte_spatial.json
+python -m estimador.live cell-id --port /dev/ttyUSB2 --registry estimador/network_registry.json
 ```
 
 O treino do WKNN exige grupos suficientes no protocolo escolhido (pelo menos 3 pontos de
@@ -290,9 +283,9 @@ faltam; não há divisão aleatória por linha.
 | `sqlite3.OperationalError: database is locked` | Duas instâncias do Coletor abertas ao mesmo tempo sobre o mesmo `.db` | Rode só 1 instância do Coletor por banco |
 | `estimador.evaluate`/`live` dá erro de subcomando | Esqueceu o subcomando logo após o nome do módulo | Ex.: `python -m estimador.evaluate compare --db ...` (subcomando vem antes das flags) |
 | `insufficient_groups` ao treinar | Poucos pontos de referência (spatial) ou sessões (temporal) com referência posicional | Colete mais pontos/sessões antes de treinar o WKNN |
-| `invalid_registry` ao usar `cell_id`/`ta` | Cadastro ausente, no formato antigo (chave por PCI) ou com campo inválido | Copie `estimador/network_registry.example.json` e preencha por `global_cell_key`; a mensagem indica a entrada e o campo |
+| `invalid_registry` ao usar `cell-id` | Cadastro ausente, no formato antigo (chave por PCI) ou com campo inválido | Copie `estimador/network_registry.example.json` e preencha por `global_cell_key`; a mensagem indica a entrada e o campo |
+| `estimador.live` termina com `snapshot inválido` ou `unavailable` | A leitura não trouxe células (ou, no WKNN, nenhuma `radio_key` do bundle) | Veja os motivos impressos; rode `python -m acquisition.snapshot --port ...` para ver a leitura completa |
 | `Sem fix GNSS ainda` | GNSS ainda não conseguiu um *fix* (TTFF) | Aguarde alguns minutos em ambiente aberto (ver `planejamento/guia_comandos_modem.md`, Seção 8) |
-| `live ... aoa` reclama de "retas paralelas" | Os 2 bearings passados são iguais/opostos na mesma reta | Confirme que os 2 ângulos vêm de âncoras/relatórios LPP diferentes |
 
 ---
 

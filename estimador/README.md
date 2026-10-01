@@ -21,8 +21,8 @@ estimador/
     estimate.py    # PositionEstimate (método, estado, motivo, lat/lon)
     train.py       # OFFLINE: seleção e treino do WKNN; grava o bundle JSON
     evaluate.py    # métricas e os subcomandos compare, cell-id e live
-    live.py        # ONLINE: mede agora, falando com o modem (não precisa do Coletor)
-    db.py          # SQLite próprio das estimativas do live.py (position_estimates)
+    live.py        # ONLINE: 1 leitura do modem -> 1 estimativa (WKNN ou Cell-ID); não precisa do Coletor
+    db.py          # banco position_estimates do live.py antigo (até a fase 5); só leitura via evaluate live
     network_registry.example.json   # modelo do cadastro de células
     methods/
         cell_id.py           # Cell-ID + validação do cadastro
@@ -88,10 +88,9 @@ python -m estimador.evaluate compare --db radiomapa_v2.db --model modelos/wknn_l
 # validar o cadastro contra todas as amostras rotuladas (erro por célula servidora)
 python -m estimador.evaluate cell-id --db radiomapa_v2.db --registry estimador/network_registry.json
 
-# medir agora (once: N leituras, 1 linha por método; continuous: até Ctrl+C) e resumir depois
-python -m estimador.live once --metodos cell_id,fingerprint --fn990-port /dev/ttyUSB2 \
-    --registry estimador/network_registry.json --fingerprint-modelo modelos/wknn_lte_spatial.json
-python -m estimador.evaluate live --db estimador_estimativas.db
+# estimar a posição agora com 1 leitura do FN990 (--json para o resultado completo)
+python -m estimador.live wknn --port /dev/ttyUSB2 --model modelos/wknn_lte_spatial.json
+python -m estimador.live cell-id --port /dev/ttyUSB2 --registry estimador/network_registry.json
 ```
 
 Opções do treino: `python -m estimador.train --help` (grade, PLMN da campanha, inclusão de
@@ -100,13 +99,30 @@ outras operadoras, de PLMN não confirmado e de `CELL_FORBIDDEN`, semente e fold
 (`test_samples_missing`, `test_samples_changed`). Métricas: cobertura, média, mediana (CE50),
 RMSE, p90, p95, máximo e CDF.
 
-## `live.py`
+## `live.py`: inferência atual (modo once)
 
-Mede a posição agora, sem depender do Coletor: lê o modem pela aquisição compartilhada
-(`acquisition/snapshot.py`) e usa o mesmo `HealthMonitor`, com conexão própria (não rode os
-dois sobre o mesmo modem ao mesmo tempo). `--gnss-real lat,lon` informa a posição verdadeira
-para gravar o erro. `ta` e `aoa` continuam legados: o modem atual não expõe TA e os ângulos
-do AoA são digitados. A operação do `live.py` é revista na fase 6.
+Um comando por método (`wknn` ou `cell-id`). Valida o bundle ou o cadastro antes de abrir a
+porta, conecta ao FN990, tira 1 snapshot pela aquisição compartilhada
+(`acquisition/snapshot.py`), estima, mostra o resultado e fecha a conexão. Não depende do
+Coletor (não rode os dois sobre o mesmo modem ao mesmo tempo), não grava banco, não liga o
+GNSS e não usa TA, LPP nem geometria angular.
+
+- Snapshot `invalid`: nenhuma estimativa (`unavailable`). Snapshot `partial`: usado só se tiver o
+  que o método exige (WKNN: `#CSURV` lido; Cell-ID: `global_cell_key` da servidora); o resultado
+  registra `snapshot_status`. Falta só de fix GNSS já deixa o snapshot `partial`.
+- WKNN: só células do `#CSURV`, vetor na ordem das `radio_key` do bundle, com as políticas de
+  PLMN, `CELL_FORBIDDEN`, ausência e escala do treino; células fora do vocabulário são
+  ignoradas e contadas (`n_ignored_keys`). Sem nenhuma `radio_key` do bundle: `unavailable`.
+  Leitura sem células da tecnologia do bundle: `technology_mismatch`.
+- Cell-ID: `valid`, `unknown_cell` ou `missing_global_cell_key`, como na avaliação.
+- Resultado (`PositionEstimate` em `estimate.py`): `method`, `valid`, `status`, `reason`,
+  `x_m`/`y_m` (ENU do bundle), `lat`/`lon`, `technology`, `snapshot_status` e `metadata`
+  (resumo do snapshot e tempos de carga e de estimativa).
+- Código de saída: 0 com estimativa válida; 1 sem estimativa ou com o FN990 indisponível
+  (porta ou modem sem resposta); 2 para bundle, cadastro ou argumento inválido.
+
+`evaluate live` continua lendo, em modo somente leitura, bancos `position_estimates` gravados
+pelo `live.py` até a fase 5; o `live.py` atual não grava nesse banco.
 
 Referências conceituais: `planejamento/arquitetura_estimadores_posicao.md` e
 `planejamento/knn_explicado.md`.

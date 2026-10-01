@@ -19,7 +19,13 @@ class PositionEstimate:
     y_m: Optional[float] = None
     technology: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    snapshot_status: Optional[str] = None  # complete/partial/invalid, quando vem de uma leitura do modem
 
     @property
     def valid(self) -> bool:
         return self.status == STATUS_VALID
+
+    def to_dict(self) -> dict:
+        return {"method": self.method, "valid": self.valid, "status": self.status, "reason": self.reason,
+                "x_m": self.x_m, "y_m": self.y_m, "lat": self.lat, "lon": self.lon, "technology": self.technology,
+                "snapshot_status": self.snapshot_status, "metadata": self.metadata}

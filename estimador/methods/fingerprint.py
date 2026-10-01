@@ -17,7 +17,8 @@ import re
 from typing import List, Sequence, Tuple
 
 from ..estimate import STATUS_TECHNOLOGY_MISMATCH, STATUS_UNAVAILABLE, STATUS_VALID, PositionEstimate
-from ..features import SCALINGS, TECHNOLOGIES, CellFilterPolicy, apply_scaling, validate_missing_value, vectorize
+from ..features import (SCALINGS, TECHNOLOGIES, CellFilterPolicy, apply_scaling, rsrp_by_key, validate_missing_value,
+                        vectorize)
 from ..geometry import COORDINATE_SYSTEM, EnuFrame
 
 MODEL_TYPE = "wknn"
@@ -127,6 +128,7 @@ class WknnModel:
         self.bundle = bundle
         self.technology = bundle["technology"]
         self.cell_keys: List[str] = bundle["cell_keys"]
+        self._key_set = set(self.cell_keys)
         self.policy = CellFilterPolicy.from_dict(bundle["cell_filter_policy"])
         self.missing_value = float(bundle["missing_value"])
         self.scaling = bundle["scaling"]
@@ -145,20 +147,23 @@ class WknnModel:
         return x, y, zero, [self._ids[i] for _, i in ordered]
 
     def predict(self, cells) -> PositionEstimate:
-        """Estima a posição a partir das células do #CSURV de uma leitura (mesmo formato do dataset)."""
+        """Estima a posição a partir das células do #CSURV de uma leitura (mesmo formato do dataset).
+        Células fora do vocabulário são ignoradas e só contadas; o bundle não muda."""
         if not any(c.rat == self.technology for c in cells):
             return PositionEstimate("wknn", STATUS_TECHNOLOGY_MISMATCH, technology=self.technology,
                                     reason=f"a leitura não tem células {self.technology} do #CSURV")
         vector, n_observed = vectorize(cells, self.policy, self.cell_keys, self.missing_value)
+        n_ignored = len(set(rsrp_by_key(cells, self.policy)) - self._key_set)
         if n_observed == 0:
             return PositionEstimate("wknn", STATUS_UNAVAILABLE, technology=self.technology,
-                                    reason="nenhuma célula do vocabulário do modelo foi observada")
+                                    reason="nenhuma radio_key do bundle foi observada na leitura",
+                                    metadata={"n_observed_keys": 0, "n_ignored_keys": n_ignored})
         x, y, zero, neighbors = self.predict_xy(vector)
         lat, lon, _ = self.frame.to_geodetic(x, y)
         return PositionEstimate(
             "wknn", STATUS_VALID, lat=lat, lon=lon, x_m=x, y_m=y, technology=self.technology,
-            metadata={"n_observed_keys": n_observed, "n_neighbors": self.k, "distance_metric": self.metric,
-                      "zero_distance": zero, "neighbor_measurement_ids": neighbors},
+            metadata={"n_observed_keys": n_observed, "n_ignored_keys": n_ignored, "n_neighbors": self.k,
+                      "distance_metric": self.metric, "zero_distance": zero, "neighbor_measurement_ids": neighbors},
         )
 
 
