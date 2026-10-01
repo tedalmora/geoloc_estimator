@@ -1,5 +1,8 @@
 {
-  "_leia_isto": "1 entrada por PCI conhecido. azimute_graus e opcional -- use null se a celula for omnidirecional (ex.: o QCell indoor) ou se o azimute do setor ainda nao for conhecido; nesse caso o metodo Cell-ID+TA so reporta um raio de incerteza, sem deslocar o ponto (ver methods/network_position.py). Copie este arquivo para network_registry.json (sem '.example') e preencha com os valores reais assim que posicionar as antenas.",
-  "100": {"lat": -26.9000, "lon": -49.0700, "azimute_graus": 120},
-  "200": {"lat": -26.9010, "lon": -49.0710, "azimute_graus": null}
+  "registry_version": 2,
+  "_leia_isto": "Cadastro do Cell-ID: 1 entrada por célula, identificada pela global_cell_key (RAT:PLMN:CELL_ID, Cell-ID em hexadecimal maiúsculo, como o Coletor grava em measurements.serving_global_cell_key). lat/lon = posição da antena. Opcionais: sector_azimuth_deg [0, 360), sector_width_deg, arfcn, pci (metadados de auditoria; a busca é só pela global_cell_key) e description. As entradas abaixo são FICTÍCIAS (PLMN de teste 00101): copie para network_registry.json e substitua pelos valores reais.",
+  "cells": [
+    {"global_cell_key": "LTE:00101:1A2B3C", "lat": -26.9000, "lon": -49.0700, "sector_azimuth_deg": 120, "sector_width_deg": 65, "arfcn": 3375, "pci": 100, "description": "exemplo fictício: setor LTE"},
+    {"global_cell_key": "NR:00101:3053A189", "lat": -26.9010, "lon": -49.0710, "description": "exemplo fictício: célula NR omnidirecional"}
+  ]
 }

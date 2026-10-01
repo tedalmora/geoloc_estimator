@@ -21,6 +21,7 @@ estimador/
     live.py                # ONLINE -- mede a posição agora, fala com o HAL direto
     network_registry.example.json   # cadastro de posição/azimute das células -- copie e preencha
     methods/
+        cell_id.py             # Método: Cell-ID por global_cell_key + validação do cadastro (baseline)
         network_position.py  # Métodos: Cell-ID/E-CID, E-CID de rede, Cell-ID+TA (sem ML)
         fingerprint.py         # Método: Fingerprinting completo (KNN/WKNN + Random Forest) -- ÚNICO com ML
         aoa.py                 # Método: DL-AoD/UL-AoA (geometria pura, sem ML)
@@ -62,11 +63,12 @@ de firmware mais nova -- ver `planejamento/procedimento_ta_sinr_fn990.md` para a
 completa e a avaliação de risco do upgrade. Não é bloqueante: o projeto já é válido com os
 outros 4 métodos, e `ta` volta a fazer sentido assim que o TA estiver disponível.
 
-## O cadastro de posições (`network_registry.json`)
+## O cadastro de células (`network_registry.json`)
 
-Copie `network_registry.example.json` para `network_registry.json` e preencha com a posição
-real de cada célula (1 entrada por PCI). `azimute_graus` é opcional -- deixe `null` se a
-célula for omnidirecional (ex.: o QCell indoor) ou se ainda não souber o azimute do setor.
+Copie `network_registry.example.json` para `network_registry.json` e preencha 1 entrada por
+célula, identificada pela `global_cell_key` (`RAT:PLMN:CELL_ID`, a mesma que o Coletor grava em
+`measurements.serving_global_cell_key`), nunca pelo PCI. Formato e regras de validação: docstring
+de `methods/cell_id.py`. Cadastro inválido não é usado: o Cell-ID responde `invalid_registry`.
 
 ## OFFLINE -- treino e comparação (dependem do Coletor)
 

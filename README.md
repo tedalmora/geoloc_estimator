@@ -22,6 +22,7 @@ codigo/
         db.py                   # SQLite próprio (position_estimates) -- o que live.py salva
         relatorio.py            # compara os métodos usando o que live.py salvou
         methods/
+            cell_id.py            # Cell-ID por global_cell_key + validação do cadastro (baseline)
             network_position.py  # Cell-ID/E-CID, E-CID de rede, Cell-ID+TA -- sem ML, cadastro conhecido
             fingerprint.py        # Fingerprinting completo (KNN/WKNN + Random Forest) -- Único com ML
             aoa.py                 # DL-AoD/UL-AoA (geometria pura, sem ML)
@@ -307,7 +308,7 @@ faltam; não há divisão aleatória por linha.
 | `sqlite3.OperationalError: database is locked` | Duas instâncias do Coletor abertas ao mesmo tempo sobre o mesmo `.db` | Rode só 1 instância do Coletor por banco |
 | `estimador.train`/`infer`/`compare`/`live` dá erro de subcomando | Esqueceu o subcomando logo após o nome do módulo | Ex.: `python -m estimador.infer cell_id --db ...` (subcomando vem antes das flags) |
 | Poucos pontos no radiomapa | O Fingerprint exige 10+ pontos; os outros 4 métodos não usam radiomapa | Rode mais sessões de coleta antes de treinar o Fingerprint |
-| `FileNotFoundError`/erro ao ler `network_registry.json` | Esqueceu de copiar `estimador/network_registry.example.json` e preencher | `Copy-Item`/`cp` o arquivo `.example.json` e edite com a posição real das células |
+| `invalid_registry` ao usar `cell_id`/`ta` | Cadastro ausente, no formato antigo (chave por PCI) ou com campo inválido | Copie `estimador/network_registry.example.json` e preencha por `global_cell_key`; a mensagem indica a entrada e o campo |
 | `UserWarning: X does not have valid feature names` ao rodar `estimador.infer`/`live` | Aviso inofensivo do scikit-learn (compara nomes de coluna) | Pode ignorar -- não afeta o resultado |
 | `Sem fix GNSS ainda` | GNSS ainda não conseguiu um *fix* (TTFF) | Aguarde alguns minutos em ambiente aberto (ver `planejamento/guia_comandos_modem.md`, Seção 8) |
 | `estimador.infer aoa`/`live ... aoa` reclama de "retas paralelas" | Os 2 bearings passados são iguais/opostos na mesma reta | Confirme que os 2 ângulos vêm de âncoras/relatórios LPP diferentes |

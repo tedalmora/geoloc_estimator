@@ -1,8 +1,9 @@
 """Medição ao vivo: fala com o modem diretamente (não depende do Coletor estar rodando) para
 estimar a posição AGORA, com 1 ou mais métodos ao mesmo tempo. Lê o modem pela aquisição
 compartilhada (`acquisition.snapshot.take_snapshot`, a mesma usada pelo Coletor) e usa o
-`HealthMonitor` (hal/health.py) para decidir reconexões. Adaptação mínima da Etapa 2 (fase 3):
-os métodos do Estimador ainda são os legados (chave por PCI) até a fase 5. Ver
+`HealthMonitor` (hal/health.py) para decidir reconexões. Cell-ID busca a global_cell_key da
+servidora no cadastro validado (methods/cell_id.py); fingerprint usa o bundle WKNN em JSON; TA e
+AoA continuam legados até a fase 7. Ver
 estimador/README.md, seção "Coleta vs. medição ao vivo", para a divisão de responsabilidades.
 
 2 modos:
@@ -45,8 +46,9 @@ from . import db as estimador_db
 from .features import cells_from_observations
 from .geometry import haversine_m
 from .methods.aoa import estimate_position_from_bearings
+from .methods.cell_id import CellRegistry, estimate_cell_id, load_registry
 from .methods.fingerprint import BundleError, WknnModel, load_bundle
-from .methods.network_position import estimate_cell_position, estimate_cell_position_ta, load_registry
+from .methods.network_position import CellPosition, estimate_cell_position_ta
 
 METODOS_DISPONIVEIS = ("cell_id", "ta", "fingerprint", "aoa")
 
@@ -57,20 +59,21 @@ def _parse_latlon(text: str) -> Tuple[float, float]:
 
 
 def _estimar_uma_leitura(
-    metodo: str, leitura: Snapshot, registry: dict, fp_bundle: Optional[WknnModel], technology: str,
+    metodo: str, leitura: Snapshot, registry: CellRegistry, fp_bundle: Optional[WknnModel], technology: str,
     aoa_bearings: Optional[tuple],
 ) -> Optional[dict]:
     """Aplica 1 método a 1 snapshot. Devolve {"lat", "lon", "raio_incerteza_m"}
     ou None se não foi possível estimar (célula fora do cadastro, modelo ausente, etc.).
-    O PCI da servidora só existe quando o cruzamento com o #CSURV foi unívoco; o TA não é lido."""
-    serving_pci = leitura.serving.pci
+    Cell-ID e o TA legado usam a global_cell_key da servidora; o TA não é lido do modem."""
+    global_key = leitura.serving.global_cell_key
 
     if metodo == "cell_id":
-        pos = estimate_cell_position(serving_pci, registry)
-        return None if pos is None else {"lat": pos[0], "lon": pos[1], "raio_incerteza_m": None}
+        estimativa = estimate_cell_id(registry, global_key, reading_available=leitura.status != "invalid")
+        return {"lat": estimativa.lat, "lon": estimativa.lon, "raio_incerteza_m": None} if estimativa.valid else None
 
     if metodo == "ta":
-        return estimate_cell_position_ta(serving_pci, None, technology, registry)
+        posicoes = {k: CellPosition(e.lat, e.lon, e.sector_azimuth_deg) for k, e in registry.entries.items()}
+        return estimate_cell_position_ta(global_key, None, technology, posicoes)
 
     if metodo == "fingerprint":
         if fp_bundle is None:
@@ -237,7 +240,11 @@ def main() -> None:
         if metodo not in METODOS_DISPONIVEIS:
             parser.error(f"método desconhecido: {metodo!r} (opções: {', '.join(METODOS_DISPONIVEIS)})")
 
-    registry = load_registry(args.registry) if ("cell_id" in metodos or "ta" in metodos) else {}
+    registry = CellRegistry()
+    if "cell_id" in metodos or "ta" in metodos:
+        registry = load_registry(args.registry)
+        if not registry.valid:
+            parser.error(f"invalid_registry: {registry.error}")
     try:
         fp_bundle = load_bundle(args.fingerprint_modelo) if ("fingerprint" in metodos and args.fingerprint_modelo) else None
     except BundleError as exc:

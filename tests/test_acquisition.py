@@ -119,11 +119,12 @@ def test_cli_do_snapshot(monkeypatch, capsys, sem_espera):
 
 def test_live_usa_a_aquisicao_e_nao_o_coletor(sem_espera):
     import estimador.live as live
-    from estimador.methods.network_position import CellPosition
+    from estimador.methods.cell_id import CellRegistry, RegistryEntry
 
     assert not hasattr(live, "poll_once")
     s = take_snapshot(driver_com(CICLO, sem_espera))
-    estimativa = live._estimar_uma_leitura("cell_id", s, {254: CellPosition(-26.9, -49.07)}, None, "4G", None)
+    cadastro = CellRegistry({"LTE:72406:F560E67": RegistryEntry("LTE:72406:F560E67", -26.9, -49.07)})
+    estimativa = live._estimar_uma_leitura("cell_id", s, cadastro, None, "4G", None)
     assert (estimativa["lat"], estimativa["lon"]) == (-26.9, -49.07)
 
 
