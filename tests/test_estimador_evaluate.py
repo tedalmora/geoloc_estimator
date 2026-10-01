@@ -61,6 +61,9 @@ def test_compare_avalia_os_dois_metodos_nas_mesmas_medicoes_de_teste(treinado, t
         assert resumo["n_total"] == len(ids) and sum(resumo["status_counts"].values()) == len(ids)
     assert r["methods"]["wknn"]["mean_m"] == pytest.approx(bundle["validation"]["test_metrics"]["mean_m"])
     assert r["methods"]["cell_id"]["status_counts"] == {"valid": len(ids)}
+    t = r["timings_s"]
+    assert (t["n_predictions"], t["n_fingerprints"]) == (len(ids), len(bundle["fingerprints"]["x_m"]))
+    assert t["load_bundle_s"] >= 0 and 0 <= t["wknn_predict_mean_s"] <= t["wknn_predict_p95_s"] <= t["wknn_predict_max_s"]
 
 
 def test_compare_registra_o_protocolo_temporal(treinado, tmp_path):

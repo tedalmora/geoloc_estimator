@@ -14,7 +14,8 @@ compare: refaz o dataset com a política de referência gravada no bundle, usa e
 medições de teste do bundle (`dataset.test_measurement_ids`) e confere `dataset.test_samples_sha256`;
 se o banco mudou, recusa. WKNN e Cell-ID são avaliados nas mesmas amostras, e a saída registra o
 protocolo (spatial ou temporal) e a coluna de grupo: resultados de protocolos diferentes não são
-equivalentes.
+equivalentes. Também informa o tempo de carga do bundle e a latência do WKNN por amostra (média,
+p95 e máximo), usados na validação do runtime no Raspberry Pi.
 cell-id: confronta o cadastro com todas as amostras rotuladas, com o erro por célula servidora.
 live: resumo por método de bancos position_estimates gravados pelo `estimador.live` até a fase 5
 (no antigo modo `once`, cada linha já é a média de N leituras); o live.py atual não grava.
@@ -25,6 +26,7 @@ import json
 import math
 import os
 import sqlite3
+import time
 from collections import Counter
 from typing import Dict, List, Optional, Sequence
 
@@ -94,8 +96,11 @@ def _registry(path: str):
 
 
 def compare(db_path: str, model_path: str, registry_path: Optional[str] = None) -> dict:
-    """WKNN (e Cell-ID, se houver cadastro) nas medições de teste registradas no bundle."""
+    """WKNN (e Cell-ID, se houver cadastro) nas medições de teste registradas no bundle. Também
+    mede o tempo de carga do bundle e a latência do WKNN por amostra (validação no hardware)."""
+    start = time.perf_counter()
     model = load_bundle(model_path)
+    load_s = time.perf_counter() - start
     bundle = model.bundle
     policy, info = bundle["reference_policy"], bundle["dataset"]
     if (not isinstance(policy, dict) or not isinstance(policy.get("allow_single_gnss"), bool)
@@ -115,18 +120,27 @@ def compare(db_path: str, model_path: str, registry_path: Optional[str] = None) 
         raise EvaluationError("test_samples_changed: as medições de teste ou suas referências mudaram desde o treino "
                               "(hash diferente; novas sessões no mesmo ponto alteram a mediana GNSS)")
     protocol = bundle["protocol"]
-    rows = []
+    rows, predict_s = [], []
     for sample in test:
-        rows.append(_row(sample, model.predict(sample.cells), protocol))
+        start = time.perf_counter()
+        estimate = model.predict(sample.cells)
+        predict_s.append(time.perf_counter() - start)
+        rows.append(_row(sample, estimate, protocol))
         if registry is not None:
             rows.append(_row(sample, estimate_cell_id(registry, sample.serving_global_cell_key), protocol))
     methods = {name: _summary([r for r in rows if r["method"] == name], len(test))
                for name in dict.fromkeys(r["method"] for r in rows)}
+    predict_s.sort()
+    timings = {"load_bundle_s": load_s, "n_fingerprints": len(bundle["fingerprints"]["x_m"]),
+               "n_cell_keys": len(bundle["cell_keys"]), "n_predictions": len(predict_s)}
+    if predict_s:
+        timings.update(wknn_predict_mean_s=sum(predict_s) / len(predict_s), wknn_predict_p95_s=percentile(predict_s, 95),
+                       wknn_predict_max_s=predict_s[-1])
     return {
         "protocol": protocol, "group_column": GROUP_COLUMN[protocol], "technology": bundle["technology"],
         "model": model_path, "registry": registry_path, "n_test_samples": len(test),
         "test_groups": sorted({s.group(protocol) for s in test}), "test_samples_sha256": info["test_samples_sha256"],
-        "methods": methods, "predictions": rows,
+        "methods": methods, "timings_s": timings, "predictions": rows,
     }
 
 
@@ -247,6 +261,11 @@ def main(argv=None) -> None:
                   f"grupos {result['test_groups']}")
             summary = _summary_rows(result["methods"], protocol=result["protocol"], group_column=result["group_column"])
             _print_table(summary, "method")
+            t = result["timings_s"]
+            if t["n_predictions"]:
+                print(f"Tempos: bundle carregado em {t['load_bundle_s']:.3f} s ({t['n_fingerprints']} fingerprints, "
+                      f"{t['n_cell_keys']} radio_keys); WKNN por amostra: média {1000 * t['wknn_predict_mean_s']:.2f} ms, "
+                      f"p95 {1000 * t['wknn_predict_p95_s']:.2f} ms, máx {1000 * t['wknn_predict_max_s']:.2f} ms")
             if args.out:
                 _write_csv(args.out, summary, ("method", "protocol", "group_column") + SUMMARY_FIELDS + ("status_counts",))
             if args.predictions_out:
