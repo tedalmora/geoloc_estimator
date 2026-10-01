@@ -1,0 +1,6 @@
+origem: sintética; código final genérico ERROR (3GPP TS 27.007 / ITU-T V.250)
+confirmado_em_campo: sim (ERROR observado para AT#5GLINKSTAT sem "?")
+uso: somente testes automatizados; não é resultado experimental
+---
+AT#MONI
+ERROR

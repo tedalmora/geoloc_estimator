@@ -1,0 +1,7 @@
+origem: exemplo do manual FN990 r5 §4.11.5.3, p. 786 (motor GNSS desligado: resposta vazia)
+confirmado_em_campo: não
+uso: somente testes automatizados; não é resultado experimental
+---
+AT$GPSACP
+$GPSACP:
+OK

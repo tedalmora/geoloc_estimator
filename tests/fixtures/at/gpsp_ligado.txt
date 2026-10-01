@@ -1,0 +1,7 @@
+origem: sintética; formato da leitura "$GPSP: <status>" do manual FN990 r5 §4.11.2.3, p. 764 (sessão GNSS ativa)
+confirmado_em_campo: não
+uso: somente testes automatizados; não é resultado experimental
+---
+AT$GPSP?
+$GPSP: 1
+OK

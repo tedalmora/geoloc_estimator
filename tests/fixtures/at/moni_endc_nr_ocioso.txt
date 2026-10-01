@@ -1,0 +1,7 @@
+origem: sintética; formato "LTE network with NR (ENDC)" do manual FN990 r5 §4.2.31, p. 308, com NR_STATE:1 (idle, p. 312)
+confirmado_em_campo: não
+uso: somente testes automatizados; não é resultado experimental
+---
+AT#MONI
+#MONI: VIVO RSRP:-107 RSRQ:-12 TAC:87BB Id:F560E67 EARFCN:3375 PWR:-76dbm DRX:640 NR_BAND:78 NR_BW:100 NR_ULBW:100 NR_CH:629952 NR_ULCH:629952 NR_PWR:-80dbm NR_RSRP:-95 NR_RSRQ:-11 NR_PCI:123 NR_SINR:150 NR_STATE:1 NR_TXPWR: NR_DLMOD:5 NR_ULMOD:5
+OK

@@ -1,5 +1,3 @@
+# Runtime do alvo (Raspberry Pi): HAL, aquisição e Coletor usam só a biblioteca padrão + pyserial.
+# Dependências de desenvolvimento, testes e do Estimador legado ficam em requirements-dev.txt.
 pyserial>=3.5
-pandas>=2.0
-numpy>=1.24
-scikit-learn>=1.3
-joblib>=1.3

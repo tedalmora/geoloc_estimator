@@ -1,0 +1,10 @@
+origem: fragmentos de campo (Vivo, set/2026) registrados nas docstrings do driver antigo; registro NR truncado como foi observado; a resposta completa não foi preservada
+confirmado_em_campo: parcial (registros individuais confirmados; ordem e conjunto completo não)
+uso: somente testes automatizados; não é resultado experimental
+---
+AT#CSURV
+Network survey started ...
+nr_arfcn: 629952 nr_band: 78 nr_scs: 30 nr_mcc: 724 nr_mnc: 06
+earfcn: 3375 rxLev: -76 mcc: 724 mnc: 06 cellId: 257298023 tac: 34747 phyCellId: 254
+cellStatus: CELL_SUITABLE rsrp: -107 rsrq: -12 bw: 15
+OK

@@ -1,0 +1,7 @@
+origem: sintética; formato LTE (nome da rede conhecido) do manual FN990 r5 §4.2.31, p. 308; valores de campo (Vivo, set/2026) reunidos de #SERVINFO e #CSURV
+confirmado_em_campo: parcial (rótulos RSRP/RSRQ/TAC/Id confirmados; linha completa não foi preservada como captura bruta)
+uso: somente testes automatizados; não é resultado experimental
+---
+AT#MONI
+#MONI: VIVO RSRP:-107 RSRQ:-12 TAC:87BB Id:F560E67 EARFCN:3375 PWR:-76dbm DRX:640
+OK

@@ -1,0 +1,7 @@
+origem: exemplo do manual FN990 r5 §4.11.5.3, p. 786 (posição na Coreia do Sul; não é medição do projeto)
+confirmado_em_campo: formato sim (fix 3D obtido em campo, valores não preservados)
+uso: somente testes automatizados; não é resultado experimental
+---
+AT$GPSACP
+$GPSACP: 002518.000,3731.303660N,12655.781816E,0.8,73.1,3,0.0,0.0,0.0,290819,18
+OK

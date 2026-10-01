@@ -1,0 +1,9 @@
+origem: sintética; regra do manual FN990 r5 §4.14.1, p. 819 ("The uncollected values during the scan time are output as '0'")
+confirmado_em_campo: não
+uso: somente testes automatizados; não é resultado experimental
+---
+AT#CSURV
+Network survey started ...
+earfcn: 3375 rxLev: 0 phyCellId: 254 cellStatus: CELL_SUITABLE rsrp: 0 rsrq: 0 band:28
+earfcn: 3375 rxLev: -80 phyCellId: 31 cellStatus: CELL_SUITABLE rsrp: -110 rsrq: -14 band:28
+OK

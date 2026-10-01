@@ -1,0 +1,7 @@
+origem: sintética; formato da leitura "$LCSLPP: <mode>" do manual FN990 r5 §4.11.1.14, p. 741 (valor padrão Latin America/Telefonica = 3)
+confirmado_em_campo: não (em campo só foi tentada a escrita AT$LCSLPP=1, que retornou +CME ERROR: 4)
+uso: somente testes automatizados; não é resultado experimental
+---
+AT$LCSLPP?
+$LCSLPP: 3
+OK

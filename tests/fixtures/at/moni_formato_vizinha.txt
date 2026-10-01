@@ -1,0 +1,7 @@
+origem: sintética; formato de célula adjacente LTE (após AT#MONI=1) do manual FN990 r5 §4.2.31, p. 309: Id é o PCI e não há TAC/DRX
+confirmado_em_campo: não
+uso: somente testes automatizados; não é resultado experimental
+---
+AT#MONI
+#MONI: RSRP:-110 RSRQ:-14 Id:FE EARFCN:3375 PWR:-80dbm
+OK

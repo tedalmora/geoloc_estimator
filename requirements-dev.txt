@@ -1,0 +1,10 @@
+# Somente no ambiente de desenvolvimento/treinamento (PC). Não instalar no alvo Buildroot.
+-r requirements.txt
+pytest>=8
+
+# Usadas apenas pelo Estimador legado (train/compare/infer/live baseados em PCI) até a fase 5 da
+# reconfiguração, quando o Estimador passa a ter runtime com dependências mínimas.
+pandas>=2.0
+numpy>=1.24
+scikit-learn>=1.3
+joblib>=1.3

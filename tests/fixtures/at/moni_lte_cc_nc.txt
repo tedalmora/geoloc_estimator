@@ -1,0 +1,7 @@
+origem: sintética; formato LTE com nome de rede desconhecido (Cc/Nc) do manual FN990 r5 §4.2.31, p. 308-309
+confirmado_em_campo: não
+uso: somente testes automatizados; não é resultado experimental
+---
+AT#MONI
+#MONI: Cc:724 Nc:06 RSRP:-107 RSRQ:-12 TAC:87BB Id:F560E67 EARFCN:3375 PWR:-76dbm DRX:640
+OK

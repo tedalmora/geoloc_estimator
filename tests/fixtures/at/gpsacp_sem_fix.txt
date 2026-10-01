@@ -1,0 +1,7 @@
+origem: exemplo do manual FN990 r5 §4.11.5.3, p. 786 (motor ligado, ainda sem fix: campo fix = 1)
+confirmado_em_campo: não
+uso: somente testes automatizados; não é resultado experimental
+---
+AT$GPSACP
+$GPSACP: ,,,,,1,,,,,,
+OK

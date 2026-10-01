@@ -1,0 +1,8 @@
+origem: sintética; reproduz o padrão observado em campo (Vivo, set/2026) em que a resposta do #MONI foi substituída por bytes atrasados de um #CSURV anterior
+confirmado_em_campo: padrão sim; bytes exatos não foram preservados
+uso: somente testes automatizados; não é resultado experimental
+---
+AT#MONI
+cellStatus: CELL_SUITABLE rsrp: -107 rsrq: -12 bw: 15
+earfcn: 3375 rxLev: -76 mcc: 724 mnc: 06 cellId: 257298023 tac: 34747 phyCellId: 254
+OK

@@ -1,0 +1,7 @@
+origem: sintética; coordenadas presentes com fix = 1, que o manual FN990 r5 (p. 784) define como "invalid fix"
+confirmado_em_campo: não
+uso: somente testes automatizados; não é resultado experimental
+---
+AT$GPSACP
+$GPSACP: 002518.000,3731.303660N,12655.781816E,99.9,73.1,1,0.0,0.0,0.0,290819,0
+OK

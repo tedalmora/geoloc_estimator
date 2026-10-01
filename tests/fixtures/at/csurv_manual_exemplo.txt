@@ -1,0 +1,42 @@
+origem: exemplo do manual FN990 r5 §4.14.1, p. 820 (rede coreana, PLMN 450-xx), com a quebra de linha em 80 colunas preservada; "OK" final acrescentado
+confirmado_em_campo: não (exemplo do fabricante); contém PCIs repetidos em canais diferentes, outras operadoras e células CELL_FORBIDDEN
+uso: somente testes automatizados; não é resultado experimental
+---
+AT#CSURV
+Network survey started ...
+nr_arfcn: 636672 nr_band: 78 nr_scs: 30 nr_mcc: 450 nr_mnc: 08 cell_id:
+810784393 tac: 10485767 pci: 639 cell_status: CELL_SUITABLE rsrp: -94 rsrq:
+-11
+earfcn: 2850 rxLev: -61 mcc: 450 mnc: 05 cellId: 7323799 tac: 12556
+phyCellId: 64 cellStatus: CELL_SUITABLE rsrp: -99 rsrq: -17 bw: 20
+earfcn: 1350 rxLev: -66 mcc: 450 mnc: 05 cellId: 7323719 tac: 12556
+phyCellId: 64 cellStatus: CELL_SUITABLE rsrp: -97 rsrq: -11 bw: 20
+earfcn: 2500 rxLev: -39 mcc: 450 mnc: 05 cellId: 448779 tac: 12556
+phyCellId: 273 cellStatus: CELL_SUITABLE rsrp: -67 rsrq: -11 bw: 10
+earfcn: 475 rxLev: -71 mcc: 450 mnc: 08 cellId: 2485767 tac: 416 phyCellId: 2
+cellStatus: CELL_FORBIDDEN rsrp: -107 rsrq: -17 bw: 15
+earfcn: 275 rxLev: -72 mcc: 450 mnc: 05 cellId: 7321443 tac: 12556
+phyCellId: 99 cellStatus: CELL_SUITABLE rsrp: -103 rsrq: -12 bw: 15
+earfcn: 100 rxLev: -69 mcc: 450 mnc: 06 cellId: 51999244 tac: 4467
+phyCellId: 87 cellStatus: CELL_FORBIDDEN rsrp: -98 rsrq: -9 bw: 20
+earfcn: 9410 rxLev: -69 mcc: 450 mnc: 30 cellId: 1155074 tac: 192 phyCellId:
+21 cellStatus: CELL_FORBIDDEN rsrp: -90 rsrq: -4 bw: 10
+earfcn: 2600 rxLev: -61 mcc: 450 mnc: 06 cellId: 51998470 tac: 4467
+phyCellId: 52 cellStatus: CELL_FORBIDDEN rsrp: -94 rsrq: -16 bw: 10
+earfcn: 3743 rxLev: -57 mcc: 450 mnc: 08 cellId: 2486272 tac: 26 phyCellId:
+245 cellStatus: CELL_FORBIDDEN rsrp: -78 rsrq: -4 bw: 10
+earfcn: 3200 rxLev: -77 mcc: 450 mnc: 05 cellId: 7323839 tac: 12556
+phyCellId: 64 cellStatus: CELL_SUITABLE rsrp: -102 rsrq: -8 bw: 10
+earfcn: 3050 rxLev: -67 mcc: 450 mnc: 06 cellId: 51999232 tac: 4467
+phyCellId: 87 cellStatus: CELL_FORBIDDEN rsrp: -95 rsrq: -8 bw: 20
+earfcn: 1694 rxLev: -66 mcc: 450 mnc: 08 cellId: 2486293 tac: 416 phyCellId:
+245 cellStatus: CELL_FORBIDDEN rsrp: -92 rsrq: -9 bw: 10
+earfcn: 1550 rxLev: -57 mcc: 450 mnc: 08 cellId: 2486275 tac: 26 phyCellId:
+245 cellStatus: CELL_FORBIDDEN rsrp: -89 rsrq: -12 bw: 20
+earfcn: 2850 rxLev: -73 phyCellId: 99 cellStatus: CELL_SUITABLE rsrp: -103
+rsrq: -18
+earfcn: 2850 rxLev: -73 phyCellId: 256 cellStatus: CELL_SUITABLE rsrp: -104
+rsrq: -19
+earfcn: 275 rxLev: -81 phyCellId: 256 cellStatus: CELL_SUITABLE rsrp: -109
+rsrq: -19
+OK

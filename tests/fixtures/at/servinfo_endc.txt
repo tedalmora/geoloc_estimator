@@ -1,0 +1,7 @@
+origem: sintética; formato "LTE network with NR (ENDC)" do manual FN990 r5 §4.2.16, p. 249
+confirmado_em_campo: não
+uso: somente testes automatizados; não é resultado experimental
+---
+AT#SERVINFO
+#SERVINFO: 3375,-76,"VIVO","72406",F560E67,87BB,640,3,-107,629952,629952,-80,-95,-11
+OK

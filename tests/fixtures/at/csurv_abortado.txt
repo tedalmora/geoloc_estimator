@@ -1,0 +1,7 @@
+origem: sintética; erro 660 "Network survey error (Aborted)" da tabela de erros do manual FN990 r5, p. 21
+confirmado_em_campo: não
+uso: somente testes automatizados; não é resultado experimental
+---
+AT#CSURV
+Network survey started ...
++CME ERROR: 660

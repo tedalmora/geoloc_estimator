@@ -1,0 +1,7 @@
+origem: sintética; formato "NR (SA)" do manual FN990 r5 §4.2.31, p. 308; valores ilustrativos
+confirmado_em_campo: não (nenhuma rede SA disponível nos testes)
+uso: somente testes automatizados; não é resultado experimental
+---
+AT#MONI
+#MONI: VIVO NR_BAND:78 NR_BW:100 NR_ULBW:100 NR_CH:629952 NR_ULCH:629952 NR_PWR:-80dbm NR_RSRP:-95 NR_RSRQ:-11 NR_PCI:123 NR_SINR:150 NR_STATE:2 NR_TXPWR: NR_DLMOD:3 NR_ULMOD:1
+OK

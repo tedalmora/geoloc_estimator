@@ -1,0 +1,7 @@
+origem: sintética; latitude e longitude sem parte decimal (formato fora do manual) para testar robustez
+confirmado_em_campo: não
+uso: somente testes automatizados; não é resultado experimental
+---
+AT$GPSACP
+$GPSACP: 002518.000,3731N,12655E,0.8,73.1,3,0.0,0.0,0.0,290819,18
+OK

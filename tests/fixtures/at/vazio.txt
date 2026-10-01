@@ -1,0 +1,4 @@
+origem: sintética; nenhuma resposta chega da porta (modem mudo ou porta errada)
+confirmado_em_campo: padrão sim (porta errada não responde)
+uso: somente testes automatizados; não é resultado experimental
+---

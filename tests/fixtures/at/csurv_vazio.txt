@@ -1,0 +1,7 @@
+origem: sintética; reproduz as varreduras degeneradas observadas em campo (Vivo, set/2026: 11 a 35 caracteres, sem nenhum registro)
+confirmado_em_campo: padrão sim; texto exato não foi preservado
+uso: somente testes automatizados; não é resultado experimental
+---
+AT#CSURV
+Network survey started ...
+OK

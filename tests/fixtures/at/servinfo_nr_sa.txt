@@ -1,0 +1,7 @@
+origem: sintética; formato "NR (SA)" do manual FN990 r5 §4.2.16, p. 249 (sem PLMN)
+confirmado_em_campo: não
+uso: somente testes automatizados; não é resultado experimental
+---
+AT#SERVINFO
+#SERVINFO: 629952,629952,-80,-95,-11
+OK

@@ -19,3 +19,7 @@ estimador/network_registry.json
 
 # exports de CSV feitos localmente
 *.csv
+backups/
+
+# cache do pytest (ambiente de desenvolvimento)
+.pytest_cache/

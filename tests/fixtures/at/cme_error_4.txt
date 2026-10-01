@@ -1,0 +1,6 @@
+origem: resposta de erro documentada no manual FN990 r5; observada em campo (Vivo, set/2026) para AT$LCSLPP=1 e AT#CSURVTA
+confirmado_em_campo: sim (texto "+CME ERROR: 4")
+uso: somente testes automatizados; não é resultado experimental
+---
+AT#MONI
++CME ERROR: 4
