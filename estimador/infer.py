@@ -29,12 +29,13 @@ from typing import Optional, Tuple
 
 import joblib
 
+from .features import open_legacy_radiomap
 from .methods.aoa import anchors_from_registry, estimate_position_from_bearings
 from .methods.network_position import estimate_cell_position, estimate_cell_position_ta, load_registry
 
 
 def _latest_measurement(db_path: str, technology: str) -> Tuple[dict, list]:
-    conn = sqlite3.connect(db_path)
+    conn = open_legacy_radiomap(db_path)
     conn.row_factory = sqlite3.Row
     m = conn.execute(
         "SELECT * FROM measurements WHERE technology = ? ORDER BY timestamp DESC LIMIT 1", (technology,)

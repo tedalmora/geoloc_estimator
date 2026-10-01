@@ -20,7 +20,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 from .evaluate import evaluate_predictions
-from .features import build_feature_vector
+from .features import build_feature_vector, open_legacy_radiomap
 from .methods.fingerprint import train_fingerprint
 from .methods.network_position import estimate_cell_position, estimate_cell_position_ta, load_registry
 
@@ -56,7 +56,7 @@ def _vocabulary_from_training(treino: pd.DataFrame, neighbors_by_measurement: Di
 
 
 def compare(db_path: str, technology: str, registry_path: str) -> pd.DataFrame:
-    conn = sqlite3.connect(db_path)
+    conn = open_legacy_radiomap(db_path)
     measurements = _load_measurements(conn, technology)
     if len(measurements) < 10:
         conn.close()

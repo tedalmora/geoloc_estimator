@@ -7,10 +7,10 @@ Os testes X01-X02 cobrem dois defeitos achados na auditoria fora das 59 verifica
 """
 import ast
 import importlib
+import json
 import math
 import pathlib
 import sqlite3
-import sys
 import time
 
 import pytest
@@ -261,14 +261,32 @@ def test_G04_cruzamento_ortogonal_conhecido():
     assert abs(lat) < 1e-6 and abs(lon - 0.0009) < 1e-6
 
 
-# --------------------------------------------------------------------------- C: Coletor (schema v1)
+# --------------------------------------------------------------------------- C: Coletor (schema v2)
 CICLO_LTE = {
     "AT": ["AT", "OK"],
+    "AT$GPSP?": "gpsp_ligado.txt",
     "AT#MONI": "moni_lte.txt",
     "AT#SERVINFO": "servinfo_lte.txt",
     "AT#CSURV": "csurv_vivo_campo.txt",
     "AT$GPSACP": "gpsacp_sem_fix.txt",
 }
+
+
+def coletar_once(monkeypatch, banco, roteiro, relogio):
+    import coletor.daemon as cd
+
+    driver = driver_com(roteiro, relogio)
+    monkeypatch.setattr(cd, "_open_modem", lambda args: driver)
+    cd.main(["once", "--port", "PORTA", "--db", str(banco), "--scenario", "estatico", "--environment", "outdoor",
+             "--reference-point", "P01", "--campaign-plmn", "72406"])
+
+
+def consulta(banco, sql):
+    conn = sqlite3.connect(banco)
+    try:
+        return conn.execute(sql).fetchall()
+    finally:
+        conn.close()
 
 
 @pytest.fixture
@@ -280,84 +298,63 @@ def banco_coletor():
     conn.close()
 
 
-@pendente(4)
 def test_C01_foreign_keys_ativas(banco_coletor):
     assert banco_coletor.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
 
-@pendente(4)
-def test_C02_tecnologia_gravada_e_a_medida(banco_coletor, sem_espera):
-    import coletor.daemon as cd
-    import coletor.db as cdb
-
-    sid = cdb.create_session(banco_coletor, "pedestre", "outdoor")
-    cdb.insert_measurement(banco_coletor, cd.poll_once(driver_com(CICLO_LTE, sem_espera), "fn990", "5G", sid))
-    assert banco_coletor.execute("SELECT technology FROM measurements").fetchone()[0] != "5G"
+def test_C02_tecnologia_gravada_e_a_medida(monkeypatch, tmp_path, sem_espera):
+    banco = tmp_path / "c02.db"
+    coletar_once(monkeypatch, banco, CICLO_LTE, sem_espera)
+    coletar_once(monkeypatch, banco, dict(CICLO_LTE, **{"AT#MONI": "moni_endc_nr_conectado.txt"}), sem_espera)
+    assert consulta(banco, "SELECT access_mode FROM measurements ORDER BY measurement_id") == [("LTE",), ("NR_NSA",)]
 
 
-@pendente(4)
 def test_C03_foreign_key_rejeita_celula_orfa(banco_coletor):
     with pytest.raises(sqlite3.IntegrityError):
-        banco_coletor.execute("INSERT INTO neighbor_cells (measurement_id, pci, rsrp_dbm) VALUES (9999, 1, -100)")
+        banco_coletor.execute(
+            "INSERT INTO observed_cells (measurement_id, source, identity_status) VALUES (9999, 'CSURV', 'none')"
+        )
 
 
-@pendente(4)
-def test_C04_health_checks_vinculados_a_sessao(banco_coletor):
-    cols = [r[1] for r in banco_coletor.execute("PRAGMA table_info(health_checks)")]
-    assert "session_id" in cols
+def test_C04_health_checks_vinculados_a_sessao(monkeypatch, tmp_path, sem_espera):
+    banco = tmp_path / "c04.db"
+    coletar_once(monkeypatch, banco, CICLO_LTE, sem_espera)
+    assert consulta(banco, "SELECT session_id, event FROM health_checks ORDER BY health_check_id") == [(1, "start"), (1, "end")]
 
 
-@pendente(4)
-def test_C05_sessao_com_status_e_metadados(banco_coletor):
-    cols = [r[1] for r in banco_coletor.execute("PRAGMA table_info(sessions)")]
-    assert "status" in cols and "metadata_json" in cols
+def test_C05_sessao_com_status_e_metadados(monkeypatch, tmp_path, sem_espera):
+    banco = tmp_path / "c05.db"
+    coletar_once(monkeypatch, banco, CICLO_LTE, sem_espera)
+    ((status, metadata),) = consulta(banco, "SELECT status, metadata_json FROM sessions")
+    assert status == "completed" and json.loads(metadata)["schema_version"] == 2
 
 
-@pendente(4)
-def test_C06_medicao_com_ponto_de_referencia(banco_coletor):
-    cols = [r[1] for r in banco_coletor.execute("PRAGMA table_info(measurements)")]
-    assert "reference_point_id" in cols
+def test_C06_medicao_com_ponto_de_referencia(monkeypatch, tmp_path, sem_espera):
+    banco = tmp_path / "c06.db"
+    coletar_once(monkeypatch, banco, CICLO_LTE, sem_espera)
+    assert consulta(banco, "SELECT m.reference_point_id = p.reference_point_id FROM measurements m, reference_points p "
+                           "WHERE p.name = 'P01'") == [(1,)]
 
 
-@pendente(4)
-def test_C07_horario_da_sessao_em_utc(banco_coletor):
-    import coletor.db as cdb
-
-    cdb.create_session(banco_coletor, "pedestre", "outdoor")
-    inicio = banco_coletor.execute("SELECT started_at FROM sessions").fetchone()[0]
-    assert inicio.endswith("Z")
+def test_C07_horario_da_sessao_em_utc(monkeypatch, tmp_path, sem_espera):
+    banco = tmp_path / "c07.db"
+    coletar_once(monkeypatch, banco, CICLO_LTE, sem_espera)
+    ((inicio, fim),) = consulta(banco, "SELECT started_at, ended_at FROM sessions")
+    assert inicio.endswith("Z") and fim.endswith("Z")
 
 
-@pendente(4)
-def test_C08_sessao_encerrada_mesmo_com_excecao(monkeypatch, sem_espera):
+def test_C08_sessao_encerrada_mesmo_com_excecao(monkeypatch, tmp_path, sem_espera):
     import coletor.daemon as cd
-    import coletor.db as cdb
-
-    compartilhado = sqlite3.connect(":memory:")
-    compartilhado.executescript(cdb.SCHEMA)
-
-    class SemFechar:
-        def __init__(self, conn):
-            self._conn = conn
-
-        def __getattr__(self, nome):
-            return getattr(self._conn, nome)
-
-        def close(self):
-            pass
 
     def falha(*args, **kwargs):
         raise sqlite3.OperationalError("database is locked")
 
-    driver = driver_com(CICLO_LTE, sem_espera)
-    monkeypatch.setattr(cd.db, "connect", lambda caminho: SemFechar(compartilhado))
-    monkeypatch.setattr(cd.db, "insert_measurement", falha)
-    monkeypatch.setattr(cd, "_connect_modems", lambda args: [("fn990", "5G", driver)])
-    monkeypatch.setattr(sys, "argv", ["coletor.daemon", "--scenario", "pedestre", "--environment", "outdoor",
-                                      "--fn990-port", "PORTA_FALSA", "--db", ":memory:"])
+    monkeypatch.setattr(cd.db, "insert_snapshot", falha)
+    banco = tmp_path / "c08.db"
     with pytest.raises(sqlite3.OperationalError):
-        cd.main()
-    assert compartilhado.execute("SELECT ended_at FROM sessions").fetchone()[0] is not None
+        coletar_once(monkeypatch, banco, CICLO_LTE, sem_espera)
+    ((status, fim, motivo),) = consulta(banco, "SELECT status, ended_at, end_reason FROM sessions")
+    assert status == "error" and fim is not None and "OperationalError" in motivo
 
 
 # --------------------------------------------------------------------------- D: dataset (Estimador legado)

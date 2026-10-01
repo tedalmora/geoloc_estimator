@@ -17,6 +17,28 @@ import pandas as pd
 FLOOR_RSRP_DBM = -140.0  # abaixo do RSRP mínimo realista -- "célula não observada nesta leitura"
 
 
+def open_legacy_radiomap(db_path: str) -> sqlite3.Connection:
+    """Abre o radiomapa do Coletor para o Estimador legado: somente leitura e só no schema v1.
+
+    O Coletor grava o schema v2 desde a fase 4 da reconfiguração; o Estimador passa a ler o v2
+    na fase 5. Até lá, um banco v2 é recusado com mensagem clara, sem nenhuma alteração.
+    """
+    from coletor.db import open_read_only, schema_info
+
+    try:
+        conn = open_read_only(db_path)
+    except FileNotFoundError as exc:
+        raise SystemExit(f"erro: {exc}") from exc
+    version, _ = schema_info(conn)
+    if version != 0:
+        conn.close()
+        raise SystemExit(
+            f"erro: {db_path} está no schema v{version} do Coletor. O Estimador legado (train/compare/infer) "
+            "só lê o schema v1; a leitura do schema v2 entra na fase 5 da reconfiguração."
+        )
+    return conn
+
+
 def build_pci_vocabulary(conn: sqlite3.Connection, technology: str) -> List[int]:
     """Lista ordenada de todos os PCIs já vistos (servidora + vizinhas) para uma tecnologia.
     Precisa ser salva junto do modelo treinado -- uma leitura nova só pode virar vetor usando

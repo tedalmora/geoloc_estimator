@@ -109,8 +109,8 @@ python -m estimador.live once --metodos aoa \
 ```
 
 `live.py` usa o mesmo `HealthMonitor` que o Coletor (`hal/health.py`) no modo `continuous`, e
-importa a função `poll_once` do Coletor só para não duplicar a lógica de leitura do HAL -- mas
-gerencia sua **própria** conexão com o modem, e não precisa do daemon do Coletor rodando.
+lê o modem pela aquisição compartilhada (`acquisition.snapshot.take_snapshot`, a mesma do
+Coletor). Mas gerencia sua **própria** conexão com o modem e não precisa do Coletor rodando.
 
 ## Comparar depois do que foi medido ao vivo (`estimador/relatorio.py`)
 
@@ -143,10 +143,9 @@ radiomapa, deve ser avaliado à parte: colete alguns pontos com GNSS conhecido, 
 - **`estimador/live.py`** = pipeline de **inferência**: responde "onde estou agora", com
   qualquer um dos 5 métodos. Roda quando você quer usar o sistema de verdade.
 
-Os dois usam o HAL (é uma biblioteca, feita para isso) e compartilham 2 utilitários pequenos
-(`poll_once`, `HealthMonitor`) só para não duplicar código -- mas são processos independentes,
-para propósitos diferentes, e você normalmente não roda os dois ao mesmo tempo sobre o mesmo
-modem.
+Os dois leem o modem pela mesma aquisição compartilhada (`acquisition/snapshot.py`) e usam o
+mesmo `HealthMonitor`. Mas são processos independentes, com propósitos diferentes, e você
+normalmente não roda os dois ao mesmo tempo sobre o mesmo modem.
 
 ## Documento de referência
 

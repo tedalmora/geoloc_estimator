@@ -8,18 +8,17 @@ Uso (rodar a partir da pasta `codigo/`):
 """
 import argparse
 import os
-import sqlite3
 
 import joblib
 from sklearn.model_selection import train_test_split
 
 from .evaluate import evaluate_predictions
-from .features import build_training_table
+from .features import build_training_table, open_legacy_radiomap
 from .methods.fingerprint import train_fingerprint
 
 
 def train(db_path: str, technology: str, out_path: str) -> None:
-    conn = sqlite3.connect(db_path)
+    conn = open_legacy_radiomap(db_path)
     X, y, vocabulary = build_training_table(conn, technology)
     conn.close()
     if len(X) < 10:

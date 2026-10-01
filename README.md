@@ -157,56 +157,62 @@ Testes automatizados (no PC, com `pip install -r requirements-dev.txt`): `python
 
 ---
 
-## 4. Coletor — constrói o radiomapa (só necessário para o Fingerprint)
+## 4. Coletor — grava sessões de coleta no banco v2
 
-O Coletor é o único componente que **é** um daemon de campanha de campo (o HAL não é — ver
-`planejamento/arquitetura_hal.md`). Ele tem 3 modos. **Só é necessário se você for treinar o
-Fingerprint** -- os outros 4 métodos não precisam de campanha de campo nenhuma. **Ver
-[`coletor/README.md`](coletor/README.md) para a explicação completa.**
+O Coletor grava cada snapshot da aquisição compartilhada num SQLite com schema v2: sessões,
+pontos de referência, medições (inclusive as inválidas, com os motivos), células observadas e
+health checks. **Ver [`coletor/README.md`](coletor/README.md) para a explicação completa.**
 
 ```bash
-# Ver só o status do modem (não cria sessão de coleta)
-python -m coletor.daemon --mode status --fn990-port /dev/ttyUSB2
+# Status do modem (não grava nada)
+python -m coletor.daemon status --port /dev/ttyUSB2
 
-# Modo sob demanda (padrão): 1 leitura de cada modem configurado, grava, e termina
-python -m coletor.daemon --scenario pedestre --environment outdoor \
-    --fn990-port /dev/ttyUSB2 --db radiomapa.db
+# Cadastrar a coordenada de um ponto de referência
+python -m coletor.daemon point-add --db radiomapa_v2.db P01 --lat -26.90012 --lon -49.07034 --coord-source levantamento
 
-# Modo contínuo: fica rodando, lendo a cada --interval segundos (padrão 60s = 1 min), até Ctrl+C
-python -m coletor.daemon --mode continuous --interval 60 \
-    --scenario pedestre --environment outdoor \
-    --fn990-port /dev/ttyUSB2 --db radiomapa.db
+# 1 snapshot numa sessão nova, parado no ponto P01
+python -m coletor.daemon once --port /dev/ttyUSB2 --db radiomapa_v2.db \
+    --scenario estatico --environment outdoor --reference-point P01 --campaign-plmn 72406
 
-# Qualquer um dos modos acima aceita --lpp-probe para também guardar a resposta crua de
-# AT$LCSLPP? (sonda experimental, só leitura; nada é gravado no modem) em lpp_raw_log
-python -m coletor.daemon --mode continuous --lpp-probe \
-    --scenario pedestre --environment outdoor \
-    --fn990-port /dev/ttyUSB2 --db radiomapa.db
+# Contínuo: 1 snapshot a cada --interval segundos (grade monotônica), até o limite ou Ctrl+C
+python -m coletor.daemon continuous --port /dev/ttyUSB2 --db radiomapa_v2.db --interval 60 \
+    --scenario pedestre --environment outdoor --route trilha_1 --campaign-plmn 72406
+
+# Qualquer sessão aceita --lpp-probe (sonda experimental somente leitura de AT$LCSLPP?)
 ```
 
 - `--scenario`: `estatico` | `pedestre` | `veicular`
 - `--environment`: `indoor` | `outdoor`
-- `--db`: caminho do arquivo SQLite (na Raspberry Pi de verdade, use algo como
-  `/data/radiomapa.db`, numa partição separada do sistema — ver
-  `planejamento/arquitetura_coleta_dados.md`, Seção 3)
+- `--reference-point NOME` ou `--route NOME`: um dos dois é obrigatório
+- `--db`: arquivo SQLite v2, criado se não existir. Na Raspberry Pi, use uma partição de dados
+  (ex.: `/data/radiomapa_v2.db`). Um banco v1 é recusado sem alteração; veja a migração abaixo.
 
-No modo contínuo, cada modem tem sua própria *thread* de leitura com **health check embutido**:
-antes de cada leitura, o Coletor testa se o modem ainda responde (`AT` → `OK`); se falhar 3
-vezes seguidas, ele tenta reconectar a porta serial sozinho. Os resultados de todo health check
-(vivo ou não) ficam gravados na tabela `health_checks`, junto com as medições.
+No modo contínuo, o Coletor registra saúde no início e no fim, em transições (falha ou
+recuperação) e periodicamente. Depois de 3 ciclos seguidos sem resposta, ele tenta reconectar.
+`Ctrl+C` ou `SIGTERM` encerram depois do ciclo em andamento, e a sessão fica `interrupted`.
+Uma exceção deixa a sessão `error`, com o motivo registrado.
 
-Para encerrar o modo contínuo, aperte `Ctrl+C` — o Coletor termina as *threads*, fecha o banco
-e marca o fim da sessão (`sessions.ended_at`) antes de sair.
-
-### Backup em CSV
+### Backup completo em CSV e restauração
 
 ```bash
-python -m coletor.export_csv --db radiomapa.db --session 1 --out sessao_1.csv
-python -m coletor.export_csv --db radiomapa.db --out tudo.csv   # sem --session = exporta tudo
+python -m coletor.export_csv export --db radiomapa_v2.db --out backups/2026-09-30
+python -m coletor.export_csv restore --from backups/2026-09-30 --db restaurado_v2.db
 ```
 
-Rode isso ao fim de cada sessão de campo e versione o CSV resultante no Git — é o backup que
-sobrevive mesmo se o cartão SD corromper (ver risco já registrado em `planejamento/como_comecar.md`).
+Rode o export ao fim de cada sessão de campo. Ele cria um CSV por tabela e um `metadata.json`
+com SHA-256 e contagens, e a restauração reconstrói o banco inteiro. É o backup que sobrevive
+mesmo se o cartão SD corromper.
+
+### Bancos v1 antigos: inspeção e migração não destrutiva
+
+```bash
+python -m coletor.migrate inspect --db radiomapa.db
+python -m coletor.migrate migrate --db radiomapa.db --out radiomapa_v2.db
+```
+
+A origem só é lida (SHA-256 conferido antes e depois), e a saída precisa ser um arquivo novo.
+As linhas migradas ficam marcadas como `legacy_ambiguous`, sem `radio_key`/`global_cell_key`,
+porque o v1 não guardava ARFCN, PLMN nem o modo de acesso medido.
 
 ### (Opcional) Rodar como serviço `systemd`
 
@@ -221,8 +227,9 @@ After=network.target
 
 [Service]
 WorkingDirectory=/home/pi/tcc-codigo
-ExecStart=/home/pi/tcc-codigo/venv/bin/python -m coletor.daemon --mode continuous --interval 60 \
-    --scenario pedestre --environment outdoor --fn990-port /dev/ttyUSB2 --db /data/radiomapa.db
+ExecStart=/home/pi/tcc-codigo/venv/bin/python -m coletor.daemon continuous --interval 60 \
+    --scenario pedestre --environment outdoor --route trilha_1 --campaign-plmn 72406 \
+    --port /dev/ttyUSB2 --db /data/radiomapa_v2.db
 Restart=on-failure
 
 [Install]
@@ -290,9 +297,11 @@ outros 4 métodos não precisam de nenhum dado histórico -- só do cadastro de 
 | Sintoma | Causa provável | O que fazer |
 |---|---|---|
 | `PermissionError` ao abrir `/dev/ttyUSBx` | Usuário não está no grupo `dialout` | `sudo usermod -aG dialout $USER` e fazer logout/login |
-| `Nenhum modem configurado` | Esqueceu de passar `--fn990-port` | Confirme a porta com `ls /dev/ttyUSB*` e `python -m hal.cli --port ... alive` |
+| `ConnectionError: ... não respondeu OK a 'AT'` | Porta errada ou modem desligado | Confirme a porta com `ls /dev/ttyUSB*` e `python -m hal.cli --port ... alive` |
+| `erro: ... banco do Coletor no formato v1` | O `--db` aponta para um banco antigo | Use `python -m coletor.migrate inspect/migrate` para gerar uma cópia v2, ou um arquivo novo |
+| `erro: ... está no schema v2 do Coletor` ao rodar `estimador.train/compare/infer` | O Estimador legado só lê bancos v1 até a fase 5 | Use um radiomapa v1 antigo para o Estimador legado |
 | Resposta vem sempre `ERROR` ou vazia | Porta serial errada (não é a porta AT) | Teste outras portas `ttyUSBx` até achar a que responde `OK` a `AT` |
-| `sqlite3.OperationalError: database is locked` | Duas instâncias do Coletor abertas ao mesmo tempo sobre o mesmo `.db` | Rode só 1 instância do daemon por banco — o design já evita concorrência interna (1 thread de escrita), mas não entre processos diferentes |
+| `sqlite3.OperationalError: database is locked` | Duas instâncias do Coletor abertas ao mesmo tempo sobre o mesmo `.db` | Rode só 1 instância do Coletor por banco |
 | `estimador.train`/`infer`/`compare`/`live` dá erro de subcomando | Esqueceu o subcomando logo após o nome do módulo | Ex.: `python -m estimador.infer cell_id --db ...` (subcomando vem antes das flags) |
 | Poucos pontos no radiomapa | O Fingerprint exige 10+ pontos; os outros 4 métodos não usam radiomapa | Rode mais sessões de coleta antes de treinar o Fingerprint |
 | `FileNotFoundError`/erro ao ler `network_registry.json` | Esqueceu de copiar `estimador/network_registry.example.json` e preencher | `Copy-Item`/`cp` o arquivo `.example.json` e edite com a posição real das células |
