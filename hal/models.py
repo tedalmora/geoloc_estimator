@@ -43,6 +43,7 @@ READ_ERROR = "error"  # ERROR, +CME ERROR ou +CMS ERROR
 READ_TIMEOUT = "timeout"  # nenhum código final dentro do prazo
 READ_MALFORMED = "malformed"  # resposta fora do formato esperado
 READ_UNSUPPORTED = "unsupported"  # formato reconhecido, mas de rede/recurso não tratado
+READ_SKIPPED = "skipped"  # comando não executado (erro de porta ou modem sem resposta)
 GNSS_NO_FIX = "no_fix"  # motor GNSS ligado, sem fix válido (campo fix 0 ou 1)
 GNSS_OFF = "off"  # motor GNSS desligado (resposta "$GPSACP:" vazia)
 

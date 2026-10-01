@@ -159,11 +159,12 @@ def test_P14_csurv_registros_colados():
     assert [o.radio_key for o in obs] == [None, "LTE:3375:254"]
 
 
-def test_P15_leitura_da_servidora_nao_dispara_csurv(sem_espera):
-    # O cruzamento do PCI é uma função pura; a aquisição (fase 3) roda 1 #CSURV por ciclo.
-    driver = driver_com({"AT#MONI": "moni_lte.txt"}, sem_espera)
-    driver.read_serving_cell()
-    assert driver._ser.written == ["AT#MONI"]
+def test_P15_csurv_uma_vez_por_ciclo(sem_espera):
+    from acquisition.snapshot import take_snapshot
+
+    driver = driver_com(CICLO_LTE, sem_espera)
+    take_snapshot(driver)
+    assert driver._ser.written.count("AT#CSURV") == 1
 
 
 def test_X01_gpsacp_malformado_nao_derruba_a_leitura(sem_espera):
@@ -345,15 +346,16 @@ def test_C08_sessao_encerrada_mesmo_com_excecao(monkeypatch, sem_espera):
         def close(self):
             pass
 
-    def falha():
-        raise TimeoutError("timeout simulado")
+    def falha(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
 
-    driver = driver_com({"AT": ["AT", "OK"], "AT#MONI": falha}, sem_espera)
+    driver = driver_com(CICLO_LTE, sem_espera)
     monkeypatch.setattr(cd.db, "connect", lambda caminho: SemFechar(compartilhado))
+    monkeypatch.setattr(cd.db, "insert_measurement", falha)
     monkeypatch.setattr(cd, "_connect_modems", lambda args: [("fn990", "5G", driver)])
     monkeypatch.setattr(sys, "argv", ["coletor.daemon", "--scenario", "pedestre", "--environment", "outdoor",
                                       "--fn990-port", "PORTA_FALSA", "--db", ":memory:"])
-    with pytest.raises(TimeoutError):
+    with pytest.raises(sqlite3.OperationalError):
         cd.main()
     assert compartilhado.execute("SELECT ended_at FROM sessions").fetchone()[0] is not None
 

@@ -4,7 +4,7 @@ import time
 import pytest
 
 # Módulos cujo `time` é trocado pelo relógio virtual no fixture `sem_espera`.
-MODULOS_COM_RELOGIO = ("hal.fn990_driver",)
+MODULOS_COM_RELOGIO = ("hal.fn990_driver", "acquisition.snapshot")
 
 
 class RelogioVirtual:

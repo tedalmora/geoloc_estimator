@@ -24,11 +24,11 @@ import time
 from types import SimpleNamespace
 from typing import List, Tuple
 
+from acquisition.snapshot import take_snapshot
 from hal.fn990_driver import FN990Driver
 from hal.health import HealthMonitor
 from hal.modem_driver import ModemDriver
-from hal.models import RAT_LTE
-from hal.parsing import resolve_serving_cell
+from hal.models import RAT_LTE, SOURCE_CSURV
 
 from . import db
 
@@ -36,39 +36,32 @@ DEFAULT_INTERVAL_S = 60.0
 
 
 def poll_once(driver: ModemDriver, modem_id: str, technology: str, session_id: int, collect_lpp: bool = False) -> dict:
-    """1 leitura completa de 1 modem, no formato do banco v1 (adaptação provisória; o Coletor
-    é reescrito sobre a aquisição compartilhada na fase 4).
+    """1 snapshot da aquisição compartilhada convertido para o formato do banco v1 (adaptação
+    provisória; o Coletor é reescrito sobre o snapshot na fase 4).
 
     `collect_lpp`: também guarda o texto cru da sonda experimental somente leitura AT$LCSLPP?.
     """
-    lpp_raw_log = driver.query_lpp_config().raw_text if collect_lpp else None
-    moni = driver.read_serving_cell()
-    servinfo = driver.read_serving_info()
-    csurv = driver.scan_cells()
-    gnss = driver.read_gnss()
-    serving = resolve_serving_cell(moni, servinfo, csurv.observations)
-    primary = moni.primary
+    snap = take_snapshot(driver, include_lpp_probe=collect_lpp)
+    fix = snap.gnss.fix
     return {
         "session_id": session_id,
         "timestamp": time.time(),
         "modem_id": modem_id,
         "technology": technology,
         "signal": SimpleNamespace(
-            rsrp_dbm=primary.rsrp_dbm if primary else None,
-            rsrq_db=primary.rsrq_db if primary else None,
-            sinr_db=moni.nr.sinr_db if moni.nr else None,
+            rsrp_dbm=snap.serving_rsrp_dbm, rsrq_db=snap.serving_rsrq_db, sinr_db=snap.serving_sinr_db,
             timing_advance=None,
         ),
-        "cell": SimpleNamespace(cell_id=serving.cell_id, pci=serving.pci, tac=serving.tac),
+        "cell": SimpleNamespace(cell_id=snap.serving.cell_id, pci=snap.serving.pci, tac=snap.serving.tac),
         "neighbors": [
             SimpleNamespace(pci=o.pci, rsrp_dbm=o.rsrp_dbm)
-            for o in csurv.observations
-            if o.rat == RAT_LTE and o.pci is not None and o.rsrp_dbm is not None
+            for o in snap.observations
+            if o.source == SOURCE_CSURV and o.rat == RAT_LTE and o.pci is not None and o.rsrp_dbm is not None
         ],
-        "gnss": None if gnss.fix is None else SimpleNamespace(
-            lat=gnss.fix.lat, lon=gnss.fix.lon, alt_m=gnss.fix.alt_m, fix_quality=str(gnss.fix.fix_type)
+        "gnss": None if fix is None else SimpleNamespace(
+            lat=fix.lat, lon=fix.lon, alt_m=fix.alt_m, fix_quality=str(fix.fix_type)
         ),
-        "lpp_raw_log": lpp_raw_log,
+        "lpp_raw_log": snap.lpp_probe.raw_text if snap.lpp_probe is not None else None,
     }
 
 

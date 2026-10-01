@@ -14,7 +14,8 @@ sozinho e qual tipo de geolocalização ele serve:
 codigo/
     hal/              # biblioteca on-demand (fala com o modem, sob demanda -- não é daemon)
         health.py             # monitor de saúde da conexão -- usado pelo Coletor E pelo estimador/live.py
-    coletor/          # o daemon de campanha de campo (usa o HAL em loop, grava o radiomapa no SQLite)
+    acquisition/      # aquisição compartilhada: 1 snapshot (MONI, SERVINFO, CSURV, GNSS) com status e motivos
+    coletor/          # o daemon de campanha de campo (grava snapshots no SQLite)
     estimador/        # OFFLINE (train.py/compare.py) + ONLINE (live.py), 5 métodos em estimador/methods/
         network_registry.example.json  # cadastro de posição/azimute das células -- copie e preencha
         live.py                # ONLINE -- mede a posição agora, 1+ métodos ao mesmo tempo, sem depender do Coletor
@@ -24,7 +25,9 @@ codigo/
             network_position.py  # Cell-ID/E-CID, E-CID de rede, Cell-ID+TA -- sem ML, cadastro conhecido
             fingerprint.py        # Fingerprinting completo (KNN/WKNN + Random Forest) -- Único com ML
             aoa.py                 # DL-AoD/UL-AoA (geometria pura, sem ML)
-    requirements.txt
+    requirements.txt      # runtime do alvo: só pyserial (HAL, aquisição, Coletor)
+    requirements-dev.txt  # PC de desenvolvimento: pytest + dependências do Estimador legado (até a fase 5)
+    tests/                # pytest; fixtures AT rotuladas em tests/fixtures/at/
     README.md         # este arquivo
 ```
 
@@ -93,6 +96,9 @@ python3 -m venv venv
 source venv/bin/activate
 
 # 4. Instalar as dependências Python
+#    requirements.txt (só pyserial) basta para HAL, aquisição e Coletor.
+#    O Estimador legado (train/compare/infer/live) ainda usa pandas/numpy/scikit-learn/joblib,
+#    listados em requirements-dev.txt, até a fase 5 da reconfiguração.
 pip install -r requirements.txt
 
 # 5. Dar permissão de acesso à porta serial do modem (evita precisar rodar tudo como root)
@@ -135,6 +141,19 @@ Cada comando imprime a leitura em JSON com `status` e a resposta crua. Os format
 conferidos no manual do FN990 (Rev.5) e em fragmentos de campo, e os parsers têm testes com
 fixtures rotuladas (`tests/fixtures/at/`). Uma resposta fora do formato esperado vira
 `status: malformed`, sem exceção; nesse caso, guarde a resposta crua e acrescente uma fixture.
+
+Para ver um ciclo completo, como o Coletor e o `live.py` leem o modem:
+
+```bash
+python -m acquisition.snapshot --port /dev/ttyUSB2               # prepare + 1 snapshot em JSON
+python -m acquisition.snapshot --port /dev/ttyUSB2 --lpp-probe   # inclui a sonda AT$LCSLPP? (só leitura)
+```
+
+O snapshot sai `complete`, `partial` ou `invalid`, com os motivos (`reasons`) e a latência de
+cada comando (`timings_s`). Ele traz a servidora com `radio_key`/`global_cell_key` e todas as
+observações de célula, cada uma com a fonte (`MONI`, `SERVINFO` ou `CSURV`).
+
+Testes automatizados (no PC, com `pip install -r requirements-dev.txt`): `python -m pytest`.
 
 ---
 

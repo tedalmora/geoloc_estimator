@@ -1,9 +1,9 @@
-"""Medição ao vivo: fala com o HAL diretamente (não depende do Coletor estar rodando) para
-estimar a posição AGORA, com 1 ou mais métodos ao mesmo tempo. Reaproveita `poll_once` (já
-existia em coletor/daemon.py, sem depender de banco) e o `HealthMonitor` (hal/health.py) --
-o mesmo utilitário de saúde que o Coletor usa, porque "o modem ainda responde?" é uma
-pergunta sobre a conexão, não sobre coleta de dados. Ver estimador/README.md, seção "Coleta
-vs. medição ao vivo", para a divisão de responsabilidades completa.
+"""Medição ao vivo: fala com o modem diretamente (não depende do Coletor estar rodando) para
+estimar a posição AGORA, com 1 ou mais métodos ao mesmo tempo. Lê o modem pela aquisição
+compartilhada (`acquisition.snapshot.take_snapshot`, a mesma usada pelo Coletor) e usa o
+`HealthMonitor` (hal/health.py) para decidir reconexões. Adaptação mínima da Etapa 2 (fase 3):
+os métodos do Estimador ainda são os legados (chave por PCI) até a fase 5. Ver
+estimador/README.md, seção "Coleta vs. medição ao vivo", para a divisão de responsabilidades.
 
 2 modos:
     once       -> tira N leituras (padrão 10), calcula a posição em cada uma por método
@@ -39,9 +39,10 @@ from typing import Dict, List, Optional, Tuple
 
 import joblib
 
-from coletor.daemon import poll_once
+from acquisition.snapshot import Snapshot, take_snapshot
 from hal.fn990_driver import FN990Driver
 from hal.health import HealthMonitor
+from hal.models import RAT_LTE, SOURCE_CSURV
 
 from . import db as estimador_db
 from .evaluate import haversine_m
@@ -57,27 +58,31 @@ def _parse_latlon(text: str) -> Tuple[float, float]:
 
 
 def _estimar_uma_leitura(
-    metodo: str, leitura: dict, registry: dict, fp_bundle: Optional[dict], technology: str,
+    metodo: str, leitura: Snapshot, registry: dict, fp_bundle: Optional[dict], technology: str,
     aoa_bearings: Optional[tuple],
 ) -> Optional[dict]:
-    """Aplica 1 método a 1 leitura bruta do HAL. Devolve {"lat", "lon", "raio_incerteza_m"}
-    ou None se não foi possível estimar (célula fora do cadastro, modelo ausente, etc.)."""
-    cell = leitura["cell"]
-    signal_metrics = leitura["signal"]
+    """Aplica 1 método a 1 snapshot. Devolve {"lat", "lon", "raio_incerteza_m"}
+    ou None se não foi possível estimar (célula fora do cadastro, modelo ausente, etc.).
+    O PCI da servidora só existe quando o cruzamento com o #CSURV foi unívoco; o TA não é lido."""
+    serving_pci = leitura.serving.pci
 
     if metodo == "cell_id":
-        pos = estimate_cell_position(cell.pci, registry)
+        pos = estimate_cell_position(serving_pci, registry)
         return None if pos is None else {"lat": pos[0], "lon": pos[1], "raio_incerteza_m": None}
 
     if metodo == "ta":
-        return estimate_cell_position_ta(cell.pci, signal_metrics.timing_advance, technology, registry)
+        return estimate_cell_position_ta(serving_pci, None, technology, registry)
 
     if metodo == "fingerprint":
         if fp_bundle is None:
             return None
         from .methods.fingerprint import predict_fingerprint  # import tardio -- só paga o custo do scikit-learn se for usado
-        m_dict = {"serving_pci": cell.pci, "rsrp_dbm": signal_metrics.rsrp_dbm, "timing_advance": signal_metrics.timing_advance}
-        neighbors_dicts = [{"pci": n.pci, "rsrp_dbm": n.rsrp_dbm} for n in leitura["neighbors"]]
+        m_dict = {"serving_pci": serving_pci, "rsrp_dbm": leitura.serving_rsrp_dbm, "timing_advance": None}
+        neighbors_dicts = [
+            {"pci": o.pci, "rsrp_dbm": o.rsrp_dbm}
+            for o in leitura.observations
+            if o.source == SOURCE_CSURV and o.rat == RAT_LTE and o.pci is not None and o.rsrp_dbm is not None
+        ]
         lat, lon = predict_fingerprint(fp_bundle, m_dict, neighbors_dicts, fp_bundle["vocabulary"])
         return {"lat": lat, "lon": lon, "raio_incerteza_m": None}
 
@@ -133,8 +138,8 @@ def _rodar_once(
     resultados: Dict[str, List[Optional[dict]]] = {m: [] for m in metodos}
     leituras_gnss = []
     for _ in range(n_amostras):
-        leitura = poll_once(driver, "fn990", technology, session_id=0)
-        leituras_gnss.append(leitura["gnss"])
+        leitura = take_snapshot(driver)
+        leituras_gnss.append(leitura.gnss.fix)
         for metodo in metodos:
             resultados[metodo].append(
                 _estimar_uma_leitura(metodo, leitura, registry, fp_bundle, technology, aoa_bearings)
@@ -186,8 +191,8 @@ def _rodar_continuous(
                 print(f"fn990: falha ao reconectar: {exc}")
 
         if alive:
-            leitura = poll_once(driver, "fn990", technology, session_id=0)
-            posicao_real = _posicao_real([leitura["gnss"]], gnss_real_override)
+            leitura = take_snapshot(driver)
+            posicao_real = _posicao_real([leitura.gnss.fix], gnss_real_override)
             for metodo in metodos:
                 estimativa = _estimar_uma_leitura(metodo, leitura, registry, fp_bundle, technology, aoa_bearings)
                 if estimativa is None:
@@ -252,6 +257,7 @@ def main() -> None:
 
     driver = FN990Driver()
     driver.connect(args.fn990_port, baudrate=args.baudrate)
+    driver.prepare_for_collection()
     conn = estimador_db.connect(args.db)
     try:
         if args.modo == "once":
