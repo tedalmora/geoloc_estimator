@@ -11,7 +11,7 @@ continua precisando apenas do `pyserial`):
 
 TA, AoA/LPP e geometria angular (`methods/network_position.py`, `methods/aoa.py`) continuam
 legados e são revistos na fase 7. Os scripts antigos `compare.py`, `infer.py` e `relatorio.py`
-foram para [`../deprecated/`](../deprecated/README.md); o Random Forest foi removido.
+foram para [`../deprecated/`](../deprecated/README.md).
 
 ```
 estimador/

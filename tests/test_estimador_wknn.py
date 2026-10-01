@@ -226,7 +226,7 @@ def test_cli_de_treino_gera_bundle_e_relatorio(radiomapa, tmp_path, capsys):
 # --------------------------------------------------------------------------- validação do bundle
 @pytest.mark.parametrize("alteracao, mensagem", [
     (lambda b: b.update(model_version=1), "model_version"),
-    (lambda b: b.update(model_type="rf"), "model_type"),
+    (lambda b: b.update(model_type="knn"), "model_type"),
     (lambda b: b.pop("enu_origin"), "metadados ausentes"),
     (lambda b: b["fingerprints"]["rsrp_dbm"][0].pop(), "um por cell_key"),
     (lambda b: b.update(n_neighbors=0), "n_neighbors"),
@@ -247,7 +247,7 @@ def test_bundle_incompativel_e_recusado(treino_spatial, alteracao, mensagem):
 
 def test_bundle_joblib_antigo_e_recusado_sem_abrir(tmp_path):
     antigo = tmp_path / "fingerprint_5g.joblib"
-    antigo.write_bytes(pickle.dumps({"rf": "modelo antigo"}))
+    antigo.write_bytes(pickle.dumps({"modelo": "antigo"}))
     conteudo = antigo.read_bytes()
     with pytest.raises(BundleError, match="retreine|treine de novo"):
         load_bundle(str(antigo))
@@ -268,11 +268,11 @@ def test_save_bundle_nao_sobrescreve_e_exige_json(treino_spatial, tmp_path):
     assert os.path.getsize(saida) == tamanho
 
 
-def test_random_forest_e_bibliotecas_numericas_fora_do_codigo_ativo():
+def test_codigo_ativo_sem_bibliotecas_numericas_nem_api_antiga_do_fingerprint():
     import re
 
     raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    proibido = re.compile(r"^\s*(from|import)\s+(sklearn|joblib|pandas|numpy)\b|RandomForest", re.MULTILINE)
+    proibido = re.compile(r"^\s*(from|import)\s+(sklearn|joblib|pandas|numpy)\b", re.MULTILINE)
     for pacote in ("acquisition", "coletor", "estimador", "hal"):
         for pasta, _, arquivos in os.walk(os.path.join(raiz, pacote)):
             for nome in arquivos:

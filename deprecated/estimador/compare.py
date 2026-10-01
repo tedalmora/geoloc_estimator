@@ -1,8 +1,8 @@
 """LEGADO (banco v1): compara cell_id/ta por PCI num sorteio de 20% das medições do radiomapa.
 
 cell_id/ta usam o cadastro antigo por PCI (methods/network_position.py). O fingerprint saiu
-deste script na fase 5 (o Random Forest foi removido e o WKNN agora é treinado e avaliado por
-`estimador.train`, com validação agrupada).
+deste script na fase 5 (o WKNN agora é treinado e avaliado por `estimador.train` e
+`estimador.evaluate`, com validação agrupada).
 
 Uso (rodar a partir da pasta `codigo/`):
     python -m estimador.compare --db radiomapa.db --technology 5G --registry network_registry.json --out resultados_5g.csv

@@ -4,8 +4,7 @@ cell_id/ta: cálculo direto (sem ML) usando o cadastro antigo por PCI
 (methods/network_position.py) -- lêem a leitura mais recente do banco do Coletor só para
 saber qual foi a última célula servidora/TA vistos.
 
-O subcomando fingerprint saiu na fase 5 (Random Forest removido; o WKNN usa o bundle JSON
-em `estimador/live.py`).
+O subcomando fingerprint saiu na fase 5 (o WKNN usa o bundle JSON em `estimador/live.py`).
 
 aoa: geometria pura a partir de 2 ângulos já extraídos de um relatório LPP -- as âncoras
 podem ser digitadas na mão (--anchor1/--anchor2) ou buscadas no cadastro (--registry +
