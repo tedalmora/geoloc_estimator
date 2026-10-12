@@ -251,6 +251,61 @@ def test_csurv_de_campo_converte_ids_decimais_para_hexadecimal():
     assert nr.radio_key is None and nr.plmn == "72406"
     assert any("registro_incompleto" in a for a in c.anomalies)
 
+def test_csurv_recupera_tokens_fragmentados_em_campo():
+    leitura = csurv("csurv_fragmentacao_tokens_real.txt")
+
+    assert leitura.status == "ok"
+    assert len(leitura.observations) == 4
+
+    completa = next(
+        observation
+        for observation in leitura.observations
+        if observation.arfcn == 525
+    )
+
+    assert completa.pci == 122
+    assert completa.rsrq_db == -8.0
+    assert completa.radio_key == "LTE:525:122"
+    assert completa.global_cell_key == "LTE:72499:F55FB0C"
+
+    pci_254 = next(
+        observation
+        for observation in leitura.observations
+        if observation.arfcn == 3375
+        and observation.pci == 254
+    )
+
+    assert pci_254.rsrp_dbm == -111.0
+    assert pci_254.rsrq_db == -12.0
+    assert pci_254.radio_key == "LTE:3375:254"
+
+    pci_253 = next(
+        observation
+        for observation in leitura.observations
+        if observation.arfcn == 3375
+        and observation.pci == 253
+    )
+
+    assert pci_253.rsrp_dbm == -126.0
+    assert pci_253.rsrq_db == -20.0
+    assert pci_253.radio_key == "LTE:3375:253"
+
+    pci_252 = next(
+        observation
+        for observation in leitura.observations
+        if observation.arfcn == 1725
+        and observation.pci == 252
+    )
+
+    assert pci_252.rsrq_db == -20.0
+    assert pci_252.radio_key == "LTE:1725:252"
+
+    assert not [
+        anomaly
+        for anomaly in leitura.anomalies
+        if "registro_incompleto:rsrq" in anomaly
+        or "registro_incompleto:phyCellId" in anomaly
+    ]
 
 def test_csurv_registros_colados_nao_inventam_plmn():
     c = csurv("csurv_registros_colados.txt")

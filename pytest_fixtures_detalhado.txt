@@ -1,0 +1,28 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.14.5, pytest-9.1.1, pluggy-1.6.0 -- C:\Users\thiago\Documents\TCC\codigo\venv\Scripts\python.exe
+rootdir: C:\Users\thiago\Documents\TCC\codigo
+configfile: pytest.ini
+collecting ... collected 29 items
+
+tests/test_fixtures.py::test_existem_fixtures PASSED                     [  3%]
+tests/test_fixtures.py::test_fixture_tem_cabecalho_de_origem[cme_error_4.txt] PASSED [  6%]
+tests/test_fixtures.py::test_fixture_tem_cabecalho_de_origem[csurv_abortado.txt] PASSED [ 10%]
+tests/test_fixtures.py::test_fixture_tem_cabecalho_de_origem[csurv_fragmentacao_tokens_real.txt] FAILED [ 13%]
+
+================================== FAILURES ===================================
+__ test_fixture_tem_cabecalho_de_origem[csurv_fragmentacao_tokens_real.txt] ___
+
+nome = 'csurv_fragmentacao_tokens_real.txt'
+
+    @pytest.mark.parametrize("nome", FIXTURES)
+    def test_fixture_tem_cabecalho_de_origem(nome):
+        meta, _ = read_fixture(nome)
+        assert [k for k in REQUIRED_HEADER_KEYS if not meta.get(k)] == []
+>       assert "n├úo ├⌐ resultado experimental" in meta["uso"]
+E       AssertionError: assert 'n\xe3o \xe9 resultado experimental' in 'somente teste automatizado de regressao; nao e resultado experimental'
+
+tests\test_fixtures.py:19: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_fixtures.py::test_fixture_tem_cabecalho_de_origem[csurv_fragmentacao_tokens_real.txt] - AssertionError: assert 'n\xe3o \xe9 resultado experimental' in 'somente teste automatizado de regressao; nao e resultado experimental'
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!
+========================= 1 failed, 3 passed in 0.08s =========================

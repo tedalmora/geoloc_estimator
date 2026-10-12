@@ -320,6 +320,42 @@ def parse_servinfo(resp: AtResponse) -> ServInfoReading:
 
 
 # ---------------------------------------------------------------- #CSURV
+def _normalize_csurv_text(lines: Sequence[str]) -> str:
+    """Normaliza somente fragmentações de tokens observadas no AT#CSURV.
+
+    O FN990 pode dividir a resposta serial no meio do nome de um campo,
+    produzindo sequências como:
+
+        rsr
+        q: -12
+
+    ou:
+
+        phyCellId
+        : 122
+
+    A normalização é aplicada apenas à cópia de trabalho usada pelo parser.
+    As linhas brutas permanecem preservadas em AtResponse.raw_lines.
+    """
+    text = " ".join(lines)
+
+    # Quebra observada em campo: "rsr" + "q:".
+    text = re.sub(
+        r"\brsr\s+q\s*:",
+        "rsrq:",
+        text,
+    )
+
+    # Quebra observada em campo: "phyCellId" + ":".
+    text = re.sub(
+        r"\bphyCellId\s+:",
+        "phyCellId:",
+        text,
+    )
+
+    return text
+
+
 def parse_csurv(resp: AtResponse) -> CsurvReading:
     """#CSURV: 1 observação por registro LTE ou NR (registros 2G/3G são só contados).
 
@@ -336,7 +372,9 @@ def parse_csurv(resp: AtResponse) -> CsurvReading:
     anomalies: List[str] = []
     observations: List[CellObservation] = []
     ignored = 0
-    for chunk in _CSURV_RECORD_START.split(" ".join(resp.lines)):
+    normalized_text = _normalize_csurv_text(resp.lines)
+
+    for chunk in _CSURV_RECORD_START.split(normalized_text):
         _, fields = _split_fields(chunk.split())
         if "nr_arfcn" in fields:
             observations.append(_csurv_nr(fields, anomalies))

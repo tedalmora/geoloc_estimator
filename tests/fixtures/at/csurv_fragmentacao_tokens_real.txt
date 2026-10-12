@@ -1,0 +1,16 @@
+origem: resposta real sanitizada do FN990A28 durante validacao no Raspberry Pi OS
+confirmado_em_campo: sim
+uso: somente teste automatizado de regressao; não é resultado experimental
+---
+AT#CSURV
+Network survey started ...
+earfcn: 525 rxLev: -50 mcc: 724 mnc: 99 cellId: 257293068 tac: 34747 phyCellId
+: 122 cellStatus: CELL_SUITABLE rsrp: -77 rsrq: -8 bw: 15
+earfcn: 3375 rxLev: -90 phyCellId: 254 cellStatus: CELL_LOW_LEVEL rsrp: -111 rsr
+q: -12
+earfcn: 3375 rxLev: -91 phyCellId: 253 cellStatus: CELL_LOW_LEVEL rsrp: -126 rsr
+q: -20
+earfcn: 1725 rxLev: -61 phyCellId: 252 cellStatus: CELL_SUITABLE rsrp: -92 rsrq:
+-20
+Network survey ended
+OK
