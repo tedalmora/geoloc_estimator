@@ -17,6 +17,7 @@ import experimental.lpp_probe as lpp
 from estimador.geometry import EnuFrame
 from estimador.methods.cell_id import CellRegistry, RegistryEntry
 from experimental.angular_geometry import intersect_bearings
+from experimental.angular_geometry import main as angular_main
 from experimental.timing_advance import TaConversion, estimate_timing_advance
 from experimental.timing_advance import main as ta_main
 
@@ -184,7 +185,7 @@ def test_bearing_e_normalizado():
 
 def test_solucao_longe_demais_e_rejeitada():
     r = intersect_bearings(A1, 0.0, ponto(100, 0), 359.0, min_angle_deg=0.5)
-    assert r.status == "geometry_degenerate" and "limite" in r.reason
+    assert r.status == "out_of_range" and "limite" in r.reason
 
 
 def test_ida_e_volta_do_plano_local():
@@ -193,6 +194,45 @@ def test_ida_e_volta_do_plano_local():
     assert r.valid and (x, y) == pytest.approx((r.x_m, r.y_m), abs=1e-6)
     assert (r.x_m, r.y_m) == pytest.approx((200.0, 200.0 / math.tan(math.radians(30.0))), abs=1e-6)
     assert math.degrees(math.atan2(r.x_m, r.y_m)) == pytest.approx(30.0)
+
+
+def argumentos_angulares(bearing_b, *extra, convencao="north-clockwise"):
+    (lat_b, lon_b) = ponto(100, 100)
+    return ["--anchor-a-lat", str(A1[0]), "--anchor-a-lon", str(A1[1]), "--bearing-a", "90", "--type-a", "DL-AoD",
+            "--anchor-b-lat", str(lat_b), "--anchor-b-lon", str(lon_b), "--bearing-b", str(bearing_b),
+            "--type-b", "UL-AoA", "--convention", convencao, *extra]
+
+
+def test_cli_angular_success_preserva_tipo_e_convencao(capsys):
+    assert angular_main(argumentos_angulares(180, "--minimum-crossing-angle", "10", "--maximum-range-m", "5000")) == 0
+    saida = json.loads(capsys.readouterr().out)
+    assert (saida["status"], saida["valid"]) == ("success", True)
+    assert (saida["x_m"], saida["y_m"]) == pytest.approx((100.0, 0.0), abs=1e-6)
+    assert saida["metadata"]["bearing_source_types"] == ["DL-AoD", "UL-AoA"]
+    assert saida["metadata"]["angular_convention"] == "north-clockwise"
+    assert "não representa o erro real" in saida["note"]
+
+
+def test_cli_angular_degenerada_fora_do_alcance_e_entrada_invalida(capsys):
+    casos = [(argumentos_angulares(90), "degenerate_geometry", 4),
+             (argumentos_angulares(180, "--maximum-range-m", "50"), "out_of_range", 5),
+             (argumentos_angulares(180, convencao="sul-horario"), "invalid_input", 2),
+             (argumentos_angulares("nan"), "invalid_input", 2),
+             (argumentos_angulares(180, "--minimum-crossing-angle", "-5"), "invalid_input", 2),
+             (["--bearing-a", "90"], "unavailable", 3)]
+    for args, status, codigo in casos:
+        assert angular_main(args) == codigo
+        saida = json.loads(capsys.readouterr().out)
+        assert (saida["status"], saida["valid"], saida["lat"]) == (status, False, None)
+
+
+def test_cli_angular_via_modulo_sem_gravar_nada(tmp_path):
+    antes = sorted(p.name for p in tmp_path.iterdir())
+    cmd = [sys.executable, "-m", "experimental.angular_geometry", *argumentos_angulares(180)]
+    saida = subprocess.run(cmd, capture_output=True, text=True, cwd=RAIZ, check=True)
+    assert json.loads(saida.stdout)["status"] == "success"
+    assert sorted(p.name for p in tmp_path.iterdir()) == antes
+    assert subprocess.run([*cmd[:3], "--help"], capture_output=True, cwd=RAIZ).returncode == 0
 
 
 # --------------------------------------------------------------------------- sonda LPP
