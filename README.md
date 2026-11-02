@@ -87,8 +87,30 @@ estar rodando: faz 1 leitura para responder "onde estou agora".
 - Modem Telit Cinterion FN990 conectado pelo adaptador M.2 → USB.
 - Acesso root/sudo, ao menos na primeira configuração.
 
-**Nota Buildroot:** na imagem Buildroot, instale `python3-pyserial` como pacote do `menuconfig`
-em vez de usar `pip` (é a única dependência de runtime; o Estimador é Python puro).
+**Nota Buildroot:** na imagem Buildroot não se usa `pip` nem `venv`. O runtime precisa de
+`BR2_PACKAGE_PYTHON3`, `BR2_PACKAGE_PYTHON3_SQLITE` (módulo `sqlite3`) e `BR2_PACKAGE_PYTHON_SERIAL`
+(pyserial; o pacote Buildroot se chama `python-serial`, não `python3-pyserial`). O Estimador é Python
+puro.
+
+A árvore `br2-external` em [`buildroot-external-tcc/`](buildroot-external-tcc/README.md) traz o
+defconfig (`tcc_rpi3_fn990_defconfig`, baseado no `raspberrypi3_defconfig`) e o pacote
+`tcc-positioning`, que instala em `/opt/tcc` só `hal/`, `acquisition/`, `coletor/`, `estimador/`,
+`experimental/`, `software_version.py` e `VERSION` (sem testes, documentos, bancos, modelos,
+cadastros reais nem logs). Uso previsto, em um Ubuntu com o Buildroot:
+
+```bash
+make BR2_EXTERNAL=/caminho/para/codigo/buildroot-external-tcc tcc_rpi3_fn990_defconfig
+make
+```
+
+Diretórios da imagem: `/opt/tcc` (código), `/etc/tcc` (`tcc.env`), `/data/tcc` (com `db/`,
+`models/` e `registry/`) e `/var/log/tcc`. Comandos: `tcc-diagnose`, `tcc-hal`, `tcc-collect`,
+`tcc-live`, `tcc-ta` e `tcc-angular`. **A coleta é iniciada manualmente**; nenhuma campanha sobe
+no boot.
+
+**Pendências:** o driver USB serial, o VID/PID e a porta AT do FN990 ainda dependem de validação
+(`lsusb`/`dmesg` no Raspberry Pi), e `TCC_AT_PORT` fica vazio até lá. **A imagem ainda não foi
+compilada nem validada** (defconfig, build, `sdcard.img`, boot e hardware pendentes).
 
 ---
 

@@ -1,0 +1,21 @@
+#!/bin/sh
+# Prepara somente diretorios e permissoes. Nao inicia coleta nem acessa o modem.
+[ -r /etc/tcc/tcc.env ] && . /etc/tcc/tcc.env
+TCC_HOME=${TCC_HOME:-/opt/tcc}
+TCC_DATA=${TCC_DATA:-/data/tcc}
+TCC_LOG=${TCC_LOG:-/var/log/tcc}
+
+case "$1" in
+	start)
+		mkdir -p "$TCC_HOME" "$TCC_DATA/db" "$TCC_DATA/models" \
+			"$TCC_DATA/registry" "$TCC_LOG"
+		chmod 0755 "$TCC_DATA" "$TCC_DATA/db" "$TCC_DATA/models" \
+			"$TCC_DATA/registry" "$TCC_LOG"
+		;;
+	stop | restart | reload) ;;
+	*)
+		echo "Uso: $0 {start|stop|restart}"
+		exit 1
+		;;
+esac
+exit 0

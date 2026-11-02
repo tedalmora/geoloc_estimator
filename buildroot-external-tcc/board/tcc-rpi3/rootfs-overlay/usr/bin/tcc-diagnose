@@ -1,0 +1,49 @@
+#!/bin/sh
+# Diagnostico somente leitura: nao acessa o modem nem cria banco.
+[ -r /etc/tcc/tcc.env ] && { set -a; . /etc/tcc/tcc.env; set +a; }
+TCC_HOME=${TCC_HOME:-/opt/tcc}
+TCC_DATA=${TCC_DATA:-/data/tcc}
+PYTHONPATH=$TCC_HOME
+export PYTHONPATH
+rc=0
+
+echo "== tcc-diagnose =="
+printf 'Versao da aplicacao: '
+python3 -c 'import software_version; print(software_version.software_version())' 2>&1 || rc=1
+printf 'Python: '
+python3 --version 2>&1 || rc=1
+printf 'Kernel: '
+uname -r
+printf 'Placa: '
+if [ -r /proc/device-tree/model ]; then
+	tr -d '\000' </proc/device-tree/model
+	echo
+else
+	echo "indisponivel"
+fi
+echo "Espaco em $TCC_DATA:"
+df -h "$TCC_DATA" 2>&1 || df -h / 2>&1
+
+echo "Portas ttyUSB:"
+found=0
+for p in /dev/ttyUSB*; do
+	[ -e "$p" ] && { echo "  $p"; found=1; }
+done
+[ "$found" -eq 0 ] && echo "  (nenhuma)"
+
+echo "/dev/serial/by-id:"
+found=0
+for p in /dev/serial/by-id/*; do
+	[ -e "$p" ] && { echo "  $p -> $(readlink "$p")"; found=1; }
+done
+[ "$found" -eq 0 ] && echo "  (nenhum)"
+
+printf 'Modulo serial (pyserial): '
+python3 -c 'import serial; print("ok", getattr(serial, "__version__", "?"))' 2>&1 | tail -n 1
+python3 -c 'import serial' 2>/dev/null || rc=1
+printf 'Modulo sqlite3: '
+python3 -c 'import sqlite3; print("ok", sqlite3.sqlite_version)' 2>&1 | tail -n 1
+python3 -c 'import sqlite3' 2>/dev/null || rc=1
+
+echo "TCC_AT_PORT=${TCC_AT_PORT:-}"
+exit "$rc"

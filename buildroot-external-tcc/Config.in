@@ -1,0 +1,1 @@
+source "$BR2_EXTERNAL_TCC_PATH/package/tcc-positioning/Config.in"

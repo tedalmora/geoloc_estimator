@@ -1,0 +1,6 @@
+#!/bin/sh
+# Encaminha os argumentos para: python3 -m hal.cli
+[ -r /etc/tcc/tcc.env ] && { set -a; . /etc/tcc/tcc.env; set +a; }
+PYTHONPATH=${TCC_HOME:-/opt/tcc}
+export PYTHONPATH
+exec python3 -m hal.cli "$@"

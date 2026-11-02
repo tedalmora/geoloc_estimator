@@ -1,0 +1,13 @@
+config BR2_PACKAGE_TCC_POSITIONING
+	bool "tcc-positioning"
+	depends on BR2_PACKAGE_PYTHON3
+	select BR2_PACKAGE_PYTHON3_SQLITE
+	select BR2_PACKAGE_PYTHON_SERIAL
+	help
+	  Aplicacao TCC de geolocalizacao (HAL do FN990, Coletor,
+	  Estimador Cell-ID/WKNN e modulos experimentais), instalada
+	  em /opt/tcc como codigo Python puro. A coleta e sempre
+	  iniciada manualmente.
+
+comment "tcc-positioning needs python3"
+	depends on !BR2_PACKAGE_PYTHON3

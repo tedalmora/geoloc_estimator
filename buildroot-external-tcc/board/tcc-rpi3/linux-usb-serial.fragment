@@ -1,0 +1,4 @@
+# Somente o nucleo USB serial. O driver especifico do FN990 (ex.: option,
+# cdc_acm, outro) NAO esta definido: depende de lsusb/dmesg no Raspberry Pi.
+CONFIG_USB=y
+CONFIG_USB_SERIAL=y
