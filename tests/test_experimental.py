@@ -18,6 +18,7 @@ from estimador.geometry import EnuFrame
 from estimador.methods.cell_id import CellRegistry, RegistryEntry
 from experimental.angular_geometry import intersect_bearings
 from experimental.timing_advance import TaConversion, estimate_timing_advance
+from experimental.timing_advance import main as ta_main
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACOTES_PRINCIPAIS = ("hal", "acquisition", "coletor", "estimador")
@@ -88,6 +89,56 @@ def test_ta_com_celula_desconhecida_ou_sem_chave():
 def test_conversao_precisa_ser_declarada_por_completo(campos):
     with pytest.raises(ValueError):
         TaConversion(*campos)
+
+
+def test_ta_com_posicao_direta_e_incerteza_configuravel():
+    r = estimate_timing_advance(3, "LTE", None, None, CONVERSAO_TESTE, cell_position=(-26.9, -49.07), uncertainty_steps=1.0)
+    assert (r.status, r.lat, r.lon, r.x_m) == ("valid", -26.9, -49.07, None)
+    assert (r.metadata["range_min_m"], r.metadata["range_max_m"]) == (200.0, 400.0)
+    assert r.metadata["position_source"] == "cell_position" and "não determina posição 2D" in r.metadata["limitation"]
+    invalidos = [dict(cell_position=(91.0, 0.0)), dict(cell_position=(float("nan"), 0.0)), dict(cell_position=("0", "0")),
+                 dict(cell_position=(0.0, 0.0), uncertainty_steps=0), dict(cell_position=(0.0, 0.0), uncertainty_steps=float("inf")),
+                 dict(cell_position=(0.0, 0.0), uncertainty_steps=-1.0), dict(cell_position=(0.0, 0.0), uncertainty_steps=True),
+                 dict(), dict(cell_position=(0.0, 0.0))]
+    for extra in invalidos:
+        registro = CADASTRO if extra == dict(cell_position=(0.0, 0.0)) else None
+        assert estimate_timing_advance(3, "LTE", CHAVE, registro, CONVERSAO_TESTE, **extra).status == "invalid_input"
+
+
+def test_cli_ta_informa_unavailable_unsupported_success_e_invalid_input(capsys):
+    base = ["--technology", "LTE", "--cell-lat", "-26.9", "--cell-lon", "-49.07"]
+    conversao = ["--unit", "passo de teste", "--meters-per-step", "100", "--conversion-source", "fictícia"]
+
+    def roda(*args):
+        codigo = ta_main(base + list(args))
+        return codigo, json.loads(capsys.readouterr().out)
+
+    assert roda()[1]["status"] == "unavailable"
+    codigo, saida = roda("--ta", "3")
+    assert (codigo, saida["status"], saida["valid"]) == (0, "unsupported", False)
+    codigo, saida = roda("--ta", "0", *conversao)
+    assert (codigo, saida["status"], saida["metadata"]["range_max_m"], saida["lat"]) == (0, "success", 50.0, -26.9)
+    assert "posição 2D" in saida["note"]
+    for args in (["--ta", "-1"], ["--ta", "x"], ["--ta", "3", "--unit", "u", "--conversion-source", "f"],
+                 ["--ta", "3", "--unit", "u", "--meters-per-step", "nan", "--conversion-source", "f"],
+                 ["--ta", "3", *conversao, "--uncertainty-steps", "0"]):
+        codigo, saida = roda(*args)
+        assert (codigo, saida["status"]) == (2, "invalid_input")
+    assert ta_main(["--technology", "LTE", "--ta", "3", *conversao, "--cell-lat", "95", "--cell-lon", "0"]) == 2
+    assert json.loads(capsys.readouterr().out)["status"] == "invalid_input"
+
+
+def test_cli_ta_com_cadastro_via_modulo_sem_gravar_nada(tmp_path):
+    cadastro = tmp_path / "cadastro.json"
+    cadastro.write_text(json.dumps({"registry_version": 2, "cells": [{"global_cell_key": CHAVE, "lat": -26.9, "lon": -49.07}]}),
+                        encoding="utf-8")
+    antes = sorted(p.name for p in tmp_path.iterdir())
+    cmd = [sys.executable, "-m", "experimental.timing_advance", "--technology", "LTE", "--ta", "2", "--unit", "u",
+           "--meters-per-step", "100", "--conversion-source", "f", "--registry", str(cadastro), "--global-cell-key", CHAVE]
+    saida = subprocess.run(cmd, capture_output=True, text=True, cwd=RAIZ, check=True)
+    resultado = json.loads(saida.stdout)
+    assert (resultado["status"], resultado["metadata"]["position_source"]) == ("success", "registry")
+    assert sorted(p.name for p in tmp_path.iterdir()) == antes
 
 
 # --------------------------------------------------------------------------- geometria de bearings
