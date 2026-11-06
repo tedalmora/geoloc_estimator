@@ -40,8 +40,9 @@ codigo/
             cell_id.py            # Cell-ID por global_cell_key + validação do cadastro (baseline)
             fingerprint.py        # Fingerprinting WKNN (Python puro, bundle JSON) -- único com treino
     experimental/     # TA, sonda LPP e geometria de bearings; fora do caminho principal, não validados
+    campaign_tools/   # auxiliares versionados de referência, visita, métricas e exportação da campanha
     deprecated/       # histórico (compare/infer/relatorio antigos); nada ativo importa daqui
-    requirements.txt      # runtime do alvo: só pyserial (HAL, aquisição, Coletor, Estimador)
+    requirements.txt      # runtime do alvo: só pyserial (HAL, aquisição, Coletor, Estimador e campaign_tools)
     requirements-dev.txt  # PC de desenvolvimento: pytest
     software_version.py   # versão gravada nas sessões e nos bundles (TCC_SOFTWARE_VERSION, VERSION ou commit git)
     VERSION               # versão do código quando não há git (ex.: cópia para o Raspberry Pi)
@@ -95,8 +96,8 @@ puro.
 A árvore `br2-external` em [`buildroot-external-tcc/`](buildroot-external-tcc/README.md) traz o
 defconfig (`tcc_rpi3_fn990_defconfig`, baseado no `raspberrypi3_defconfig`) e o pacote
 `tcc-positioning`, que instala em `/opt/tcc` só `hal/`, `acquisition/`, `coletor/`, `estimador/`,
-`experimental/`, `software_version.py` e `VERSION` (sem testes, documentos, bancos, modelos,
-cadastros reais nem logs). Uso previsto, em um Ubuntu com o Buildroot:
+`experimental/`, `campaign_tools/`, `software_version.py` e `VERSION` (sem testes, documentos,
+bancos, modelos, cadastros reais nem logs). Uso previsto, em um Ubuntu com o Buildroot:
 
 ```bash
 make BR2_EXTERNAL=/caminho/para/codigo/buildroot-external-tcc tcc_rpi3_fn990_defconfig

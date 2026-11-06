@@ -12,11 +12,12 @@ TCC_POSITIONING_DEPENDENCIES = python3 python-serial
 
 # Evita copiar para o diretorio de build o que nunca vai para a imagem
 TCC_POSITIONING_OVERRIDE_SRCDIR_RSYNC_EXCLUSIONS = \
-	/venv /.venv /tests /deprecated /buildroot-external-tcc \
-	__pycache__ .pytest_cache pytest_*.txt
+	--exclude='/venv' --exclude='/.venv' --exclude='/tests' \
+	--exclude='/deprecated' --exclude='/buildroot-external-tcc' \
+	--exclude='__pycache__' --exclude='.pytest_cache' --exclude='pytest_*.txt'
 
 # Somente estes itens vao para /opt/tcc
-TCC_POSITIONING_APP_DIRS = hal acquisition coletor estimador experimental
+TCC_POSITIONING_APP_DIRS = hal acquisition coletor estimador experimental campaign_tools
 
 TCC_POSITIONING_RSYNC_EXCLUDES = \
 	--exclude='__pycache__/' --exclude='.pytest_cache/' \

@@ -3,9 +3,9 @@
 Árvore `br2-external` mínima para gerar uma imagem Buildroot do projeto (Raspberry Pi 3
 Model B Rev 1.2 + FN990 por USB).
 
-> **Estado:** os arquivos foram apenas escritos e versionados. **Nada disto foi carregado,
-> configurado, compilado nem testado** (Buildroot, `make`, scripts shell, imagem, boot,
-> Raspberry Pi e FN990 estão pendentes).
+> **Estado:** a sincronização local do pacote tem teste com `make` e `rsync`.
+> A compilação completa da imagem, o boot e a validação no Raspberry Pi/FN990
+> continuam pendentes.
 
 ## Conteúdo
 
@@ -13,7 +13,7 @@ Model B Rev 1.2 + FN990 por USB).
 |---|---|
 | `external.desc`, `external.mk`, `Config.in` | registro da árvore (`BR2_EXTERNAL_TCC_PATH`) |
 | `configs/tcc_rpi3_fn990_defconfig` | `raspberrypi3_defconfig` (branch 2025.02.x) + Python 3, `python3-sqlite`, `python-serial`, `usbutils` e o pacote |
-| `package/tcc-positioning/` | instala em `/opt/tcc` somente `hal/`, `acquisition/`, `coletor/`, `estimador/`, `experimental/`, `software_version.py` e `VERSION` |
+| `package/tcc-positioning/` | instala em `/opt/tcc` somente `hal/`, `acquisition/`, `coletor/`, `estimador/`, `experimental/`, `campaign_tools/`, `software_version.py` e `VERSION` |
 | `board/tcc-rpi3/linux-usb-serial.fragment` | só o núcleo USB serial (`CONFIG_USB_SERIAL`) |
 | `board/tcc-rpi3/rootfs-overlay/` | `/etc/tcc/tcc.env`, `/etc/init.d/S02tcc-dirs`, `/usr/bin/tcc-*` |
 
@@ -33,6 +33,9 @@ make
 
 O pacote usa o próprio repositório como fonte (`SITE_METHOD = local`, pasta acima de
 `buildroot-external-tcc/`); portanto a árvore deve permanecer dentro do repositório.
+As exclusões da sincronização são opções `--exclude` passadas ao `rsync`. O teste
+`tests/test_buildroot_package.py` verifica essas opções e, quando `make` e `rsync`
+estão disponíveis, executa a sincronização com arquivos de exemplo.
 
 ## Diretórios na imagem
 
@@ -51,8 +54,7 @@ separada). `S02tcc-dirs` só cria os diretórios e ajusta permissões; **não in
 ## Pendente
 
 Ubuntu: carregar o defconfig; `menuconfig`; compilar; gerar `sdcard.img`; validar os scripts
-shell e o `tcc-positioning.mk` (inclusive `OVERRIDE_SRCDIR_RSYNC_EXCLUSIONS`) e conferir o
-conteúdo de `/opt/tcc` na imagem.
+shell e a instalação integrada do pacote; conferir o conteúdo de `/opt/tcc` na imagem.
 
 Raspberry Pi/FN990: primeiro boot; persistência em `/data` após reboot; `lsusb`/`dmesg` para
 VID/PID e driver USB serial do FN990 (nenhum foi definido aqui, só o núcleo `USB_SERIAL`);
