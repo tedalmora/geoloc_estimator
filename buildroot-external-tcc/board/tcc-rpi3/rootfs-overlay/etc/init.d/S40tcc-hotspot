@@ -1,0 +1,63 @@
+#!/bin/sh
+
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+INTERFACE=wlan0
+CONFIG=/etc/tcc/hostapd.conf
+PIDFILE=/var/run/tcc-hostapd.pid
+
+stop_hostapd() {
+	if [ -s "$PIDFILE" ]; then
+		PID=$(cat "$PIDFILE")
+		case "$PID" in
+			''|*[!0-9]*) echo "PID invalido em $PIDFILE"; return 1 ;;
+		esac
+		if kill -0 "$PID" 2>/dev/null; then
+			kill -TERM "$PID" || return 1
+			while kill -0 "$PID" 2>/dev/null; do sleep 1; done
+		fi
+		rm -f "$PIDFILE"
+	fi
+}
+
+start_hotspot() {
+	if [ ! -r "$CONFIG" ]; then
+		echo "Hotspot nao iniciado: configure $CONFIG a partir do exemplo local."
+		return 1
+	fi
+	if [ "$(grep -c '^wpa_passphrase=' "$CONFIG")" -ne 1 ] \
+		|| ! grep -Eq '^wpa_passphrase=.{8,63}$' "$CONFIG" \
+		|| grep -q '^wpa_passphrase=REPLACE_WITH_LOCAL_PASSWORD$' "$CONFIG"; then
+		echo "Hotspot nao iniciado: defina uma senha WPA2 local em $CONFIG."
+		return 1
+	fi
+	modprobe brcmfmac || return 1
+	count=0
+	while [ ! -d "/sys/class/net/$INTERFACE" ] && [ "$count" -lt 10 ]; do
+		sleep 1
+		count=$((count + 1))
+	done
+	if [ ! -d "/sys/class/net/$INTERFACE" ]; then
+		echo "Hotspot nao iniciado: interface $INTERFACE indisponivel."
+		return 1
+	fi
+	ifconfig "$INTERFACE" 192.168.50.1 netmask 255.255.255.0 up || return 1
+	/usr/sbin/hostapd -B -P "$PIDFILE" "$CONFIG" || return 1
+	echo "Hotspot TCC-RPI3 ativo em 192.168.50.1; DHCP limitado a wlan0."
+}
+
+case "$1" in
+	start)
+		start_hotspot
+		;;
+	stop)
+		stop_hostapd
+		ifconfig "$INTERFACE" down 2>/dev/null || true
+		;;
+	restart)
+		stop_hostapd && start_hotspot
+		;;
+	*)
+		echo "Uso: $0 {start|stop|restart}"
+		exit 1
+		;;
+esac

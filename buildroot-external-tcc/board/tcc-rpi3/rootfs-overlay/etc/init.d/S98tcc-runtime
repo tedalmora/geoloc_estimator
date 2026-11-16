@@ -1,0 +1,92 @@
+#!/bin/sh
+
+CONFIG=/etc/tcc/runtime.conf
+PIDFILE=/var/run/tcc-runtime.pid
+LOG=/var/log/tcc/runtime.log
+
+log_message() {
+	mkdir -p /var/log/tcc
+	printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >> "$LOG"
+}
+
+read_mode() {
+	awk -F= '
+		/^[[:space:]]*TCC_MODE[[:space:]]*=/ {
+			value = $2
+			gsub(/[[:space:]]/, "", value)
+			print value
+		}
+	' "$CONFIG"
+}
+
+start_runtime() {
+	if [ ! -r "$CONFIG" ]; then
+		log_message "runtime nao iniciado: $CONFIG ausente ou ilegivel"
+		return 1
+	fi
+	MODE=$(read_mode)
+	case "$MODE" in
+		manual)
+			if ! PYTHONPATH=/opt/tcc /usr/bin/python3 -m runtime.daemon \
+				--config "$CONFIG" >> "$LOG" 2>&1; then
+				log_message "runtime nao iniciado: runtime.conf invalido"
+				return 1
+			fi
+			log_message "TCC_MODE=manual; runtime nao iniciado"
+			return 0
+			;;
+		runtime) ;;
+		*)
+			log_message "runtime nao iniciado: TCC_MODE invalido"
+			return 1
+			;;
+	esac
+	if [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+		log_message "runtime ja esta em execucao"
+		return 0
+	fi
+	mkdir -p /var/run /var/log/tcc
+	PYTHONPATH=/opt/tcc /usr/bin/python3 -m runtime.daemon \
+		--config "$CONFIG" >> "$LOG" 2>&1 &
+	PID=$!
+	echo "$PID" > "$PIDFILE"
+	sleep 1
+	if ! kill -0 "$PID" 2>/dev/null; then
+		rm -f "$PIDFILE"
+		log_message "runtime encerrou durante a validacao; consulte o log"
+		return 1
+	fi
+	log_message "runtime iniciado; aguardando FN990"
+}
+
+stop_runtime() {
+	if [ ! -s "$PIDFILE" ]; then
+		return 0
+	fi
+	PID=$(cat "$PIDFILE")
+	case "$PID" in
+		''|*[!0-9]*) log_message "PID invalido em $PIDFILE"; return 1 ;;
+	esac
+	if kill -0 "$PID" 2>/dev/null; then
+		kill -TERM "$PID" || return 1
+		while kill -0 "$PID" 2>/dev/null; do sleep 1; done
+	fi
+	rm -f "$PIDFILE"
+	log_message "runtime encerrado"
+}
+
+case "$1" in
+	start)
+		start_runtime
+		;;
+	stop)
+		stop_runtime
+		;;
+	restart)
+		stop_runtime && start_runtime
+		;;
+	*)
+		echo "Uso: $0 {start|stop|restart}"
+		exit 1
+		;;
+esac
