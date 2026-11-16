@@ -20,14 +20,25 @@ stop_hostapd() {
 }
 
 start_hotspot() {
+	if [ -s "$PIDFILE" ]; then
+		PID=$(cat "$PIDFILE")
+		case "$PID" in
+			''|*[!0-9]*) echo "PID invalido em $PIDFILE"; return 1 ;;
+		esac
+		if kill -0 "$PID" 2>/dev/null; then
+			echo "Hotspot ja ativo."
+			return 0
+		fi
+		rm -f "$PIDFILE" || return 1
+	fi
 	if [ ! -r "$CONFIG" ]; then
-		echo "Hotspot nao iniciado: configure $CONFIG a partir do exemplo local."
+		echo "Hotspot nao iniciado: $CONFIG ausente."
 		return 1
 	fi
 	if [ "$(grep -c '^wpa_passphrase=' "$CONFIG")" -ne 1 ] \
 		|| ! grep -Eq '^wpa_passphrase=.{8,63}$' "$CONFIG" \
-		|| grep -q '^wpa_passphrase=REPLACE_WITH_LOCAL_PASSWORD$' "$CONFIG"; then
-		echo "Hotspot nao iniciado: defina uma senha WPA2 local em $CONFIG."
+		|| grep -Eq 'SUBSTITUIR_LOCALMENTE|REPLACE_WITH_LOCAL_PASSWORD' "$CONFIG"; then
+		echo "Hotspot nao iniciado: credencial WPA2 invalida em $CONFIG."
 		return 1
 	fi
 	modprobe brcmfmac || return 1

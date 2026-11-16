@@ -23,3 +23,6 @@ backups/
 
 # cache do pytest (ambiente de desenvolvimento)
 .pytest_cache/
+
+buildroot-external-tcc/local-secrets/hostapd.conf
+buildroot-external-tcc/local-secrets/root_password_hash

@@ -17,7 +17,7 @@ TCC_POSITIONING_OVERRIDE_SRCDIR_RSYNC_EXCLUSIONS = \
 	--exclude='__pycache__' --exclude='.pytest_cache' --exclude='pytest_*.txt'
 
 # Somente estes itens vao para /opt/tcc
-TCC_POSITIONING_APP_DIRS = hal acquisition coletor estimador experimental campaign_tools
+TCC_POSITIONING_APP_DIRS = hal acquisition coletor estimador experimental campaign_tools runtime
 
 TCC_POSITIONING_RSYNC_EXCLUDES = \
 	--exclude='__pycache__/' --exclude='.pytest_cache/' \

@@ -8,8 +8,10 @@ TCC_LOG=${TCC_LOG:-/var/log/tcc}
 case "$1" in
 	start)
 		mkdir -p "$TCC_HOME" "$TCC_DATA/db" "$TCC_DATA/models" \
+			"$TCC_DATA/runtime" \
 			"$TCC_DATA/registry" "$TCC_LOG"
 		chmod 0755 "$TCC_DATA" "$TCC_DATA/db" "$TCC_DATA/models" \
+			"$TCC_DATA/runtime" \
 			"$TCC_DATA/registry" "$TCC_LOG"
 		;;
 	stop | restart | reload) ;;

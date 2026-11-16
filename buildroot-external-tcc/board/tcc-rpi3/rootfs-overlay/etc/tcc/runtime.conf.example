@@ -1,0 +1,10 @@
+# Copie para /etc/tcc/runtime.conf e configure a porta AT confirmada.
+TCC_MODE=manual
+TCC_METHOD=wknn
+TCC_PORT=
+TCC_INTERVAL=240
+TCC_MODEL=/data/tcc/models/wknn_lte_spatial.json
+TCC_REGISTRY=/data/tcc/registry/network_registry.json
+TCC_OUTPUT=/data/tcc/runtime/latest_position.json
+TCC_HISTORY=/data/tcc/runtime/history.jsonl
+TCC_LOG=/var/log/tcc/runtime.log

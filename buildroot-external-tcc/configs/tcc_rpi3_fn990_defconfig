@@ -1,23 +1,23 @@
-# Base: configs/raspberrypi3_defconfig do Buildroot (branch 2025.02.x; kernel e
-# firmware fixados por ele). Estas linhas, junto com as adicoes TCC abaixo, ainda
+# Base: configs/raspberrypi3_defconfig do Buildroot 2026.08.1; kernel e
+# firmware fixados por ele. Estas linhas, junto com as adicoes TCC abaixo, ainda
 # NAO foram carregadas nem compiladas: validar com "make <defconfig>" e
 # "make savedefconfig" no Ubuntu e conferir com o raspberrypi3_defconfig da
 # versao exata do Buildroot usada.
 BR2_arm=y
 BR2_cortex_a53=y
 BR2_ARM_FPU_NEON_VFPV4=y
-BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_6=y
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_12=y
 BR2_TOOLCHAIN_BUILDROOT_WCHAR=y
 BR2_TOOLCHAIN_BUILDROOT_CXX=y
 BR2_GLOBAL_PATCH_DIR="board/raspberrypi/patches"
 BR2_DOWNLOAD_FORCE_CHECK_HASHES=y
 BR2_SYSTEM_DHCP="eth0"
 BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_TCC_PATH)/board/tcc-rpi3/rootfs-overlay"
-BR2_ROOTFS_POST_BUILD_SCRIPT="board/raspberrypi3/post-build.sh"
+BR2_ROOTFS_POST_BUILD_SCRIPT="board/raspberrypi3/post-build.sh $(BR2_EXTERNAL_TCC_PATH)/board/tcc-rpi3/post-build.sh"
 BR2_ROOTFS_POST_IMAGE_SCRIPT="board/raspberrypi3/post-image.sh"
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
-BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="$(call github,raspberrypi,linux,576cc10e1ed50a9eacffc7a05c796051d7343ea4)/linux-576cc10e1ed50a9eacffc7a05c796051d7343ea4.tar.gz"
+BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="$(call github,raspberrypi,linux,21b410140c47ffab5668399f6f143c7d7b935c8b)/linux-21b410140c47ffab5668399f6f143c7d7b935c8b.tar.gz"
 BR2_LINUX_KERNEL_DEFCONFIG="bcm2709"
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_TCC_PATH)/board/tcc-rpi3/linux-usb-serial.fragment"
 BR2_LINUX_KERNEL_DTS_SUPPORT=y
@@ -31,6 +31,16 @@ BR2_PACKAGE_RPI_FIRMWARE_VARIANT_PI=y
 BR2_PACKAGE_RPI_FIRMWARE_CONFIG_FILE="board/raspberrypi3/config_3.txt"
 BR2_PACKAGE_KMOD=y
 BR2_PACKAGE_KMOD_TOOLS=y
+
+# Hotspot administrativo em wlan0 (driver brcmfmac vem do bcm2709_defconfig)
+BR2_PACKAGE_HOSTAPD=y
+BR2_PACKAGE_HOSTAPD_DRIVER_NL80211=y
+BR2_PACKAGE_DNSMASQ=y
+BR2_PACKAGE_DNSMASQ_DHCP=y
+BR2_PACKAGE_DROPBEAR=y
+BR2_TARGET_ENABLE_ROOT_LOGIN=y
+BR2_PACKAGE_LINUX_FIRMWARE=y
+BR2_PACKAGE_LINUX_FIRMWARE_BRCM_BCM43XXX=y
 
 # Raiz ext4 gravavel no cartao SD (maior que os 120M oficiais: Python + SQLite)
 BR2_TARGET_ROOTFS_EXT2=y

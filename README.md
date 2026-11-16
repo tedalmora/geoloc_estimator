@@ -41,8 +41,9 @@ codigo/
             fingerprint.py        # Fingerprinting WKNN (Python puro, bundle JSON) -- único com treino
     experimental/     # TA, sonda LPP e geometria de bearings; fora do caminho principal, não validados
     campaign_tools/   # auxiliares versionados de referência, visita, métricas e exportação da campanha
+    runtime/          # daemon de inferência periódica (separado da campanha)
     deprecated/       # histórico (compare/infer/relatorio antigos); nada ativo importa daqui
-    requirements.txt      # runtime do alvo: só pyserial (HAL, aquisição, Coletor, Estimador e campaign_tools)
+    requirements.txt      # runtime do alvo: só pyserial; runtime usa interfaces existentes
     requirements-dev.txt  # PC de desenvolvimento: pytest
     software_version.py   # versão gravada nas sessões e nos bundles (TCC_SOFTWARE_VERSION, VERSION ou commit git)
     VERSION               # versão do código quando não há git (ex.: cópia para o Raspberry Pi)
@@ -62,6 +63,9 @@ flowchart LR
     TREINO -. "bundle WKNN .json" .-> LIVE
     ACQ -- "chamada síncrona" --> LIVE["estimador/live.py\ninferência atual (online)"]
     LIVE --> POS["posição estimada\n(1 leitura, modo once)"]
+    ACQ --> RUNTIME["runtime/daemon.py\ninferência periódica"]
+    RUNTIME --> LIVE
+    RUNTIME --> LATEST["latest_position.json"]
 ```
 
 O HAL não sabe que o Coletor ou o `live.py` existem (só responde quando chamado). Os dois usam a
@@ -94,24 +98,59 @@ estar rodando: faz 1 leitura para responder "onde estou agora".
 puro.
 
 A árvore `br2-external` em [`buildroot-external-tcc/`](buildroot-external-tcc/README.md) traz o
-defconfig (`tcc_rpi3_fn990_defconfig`, baseado no `raspberrypi3_defconfig`) e o pacote
-`tcc-positioning`, que instala em `/opt/tcc` só `hal/`, `acquisition/`, `coletor/`, `estimador/`,
-`experimental/`, `campaign_tools/`, `software_version.py` e `VERSION` (sem testes, documentos,
-bancos, modelos, cadastros reais nem logs). Uso previsto, em um Ubuntu com o Buildroot:
+defconfig (`tcc_rpi3_fn990_defconfig`, baseado no `raspberrypi3_defconfig` do Buildroot 2026.08.1)
+e o pacote `tcc-positioning`, que instala em `/opt/tcc` o código operacional, incluindo `runtime/`
+e `campaign_tools/` (sem testes, documentos, bancos, modelos, cadastros reais nem logs). Uso
+previsto, em um Ubuntu com o Buildroot:
 
 ```bash
 make BR2_EXTERNAL=/caminho/para/codigo/buildroot-external-tcc tcc_rpi3_fn990_defconfig
 make
 ```
 
-Diretórios da imagem: `/opt/tcc` (código), `/etc/tcc` (`tcc.env`), `/data/tcc` (com `db/`,
-`models/` e `registry/`) e `/var/log/tcc`. Comandos: `tcc-diagnose`, `tcc-hal`, `tcc-collect`,
-`tcc-live`, `tcc-ta` e `tcc-angular`. **A coleta é iniciada manualmente**; nenhuma campanha sobe
-no boot.
+Diretórios da imagem: `/opt/tcc` (código), `/etc/tcc` (configuração), `/data/tcc` (com `db/`,
+`models/`, `registry/` e `runtime/`) e `/var/log/tcc`. Em todos os boots, `S40tcc-hotspot`
+configura `wlan0` em `192.168.50.1/24` e inicia o AP `TCC-RPI3`; o init oficial do dnsmasq
+distribui `192.168.50.10`–`192.168.50.30`, somente em `wlan0`, sem DNS ou NAT. O init oficial
+do Dropbear inicia SSH por senha, permitindo `ssh root@192.168.50.1`. O FN990 permanece dedicado
+à aquisição celular/GNSS, e o hotspot não depende dele.
+
+Antes do build, crie localmente `buildroot-external-tcc/local-secrets/hostapd.conf` a partir do
+`.example` e gere `root_password_hash` com `openssl passwd -6`. Os dois arquivos reais são
+individualmente ignorados pelo Git. O post-build falha sem credenciais válidas, instala a
+configuração hostapd com modo 0600 e grava somente o hash no campo de senha root em
+`/etc/shadow`. Senhas e hashes reais nunca são versionados nem impressos no log.
+
+## Runtime autônomo
+
+O build instala `/etc/tcc/runtime.conf` a partir do exemplo versionado somente se o arquivo ainda
+não existir. Em Raspberry Pi OS, use o exemplo em
+`buildroot-external-tcc/board/tcc-rpi3/rootfs-overlay/etc/tcc/runtime.conf.example`
+como origem para `/etc/tcc/runtime.conf`. Configure a porta AT somente depois de confirmá-la.
+`TCC_MODE=manual` (padrão) mantém hotspot e SSH, mas não inicia inferência nem campanha.
+`TCC_MODE=runtime` valida método, porta, intervalo e modelo/cadastro a cada boot, aguarda o FN990
+e executa inferência periódica. Ao iniciar, substitui uma posição antiga por estado `unavailable`
+enquanto aguarda o modem. Em Raspberry Pi OS, usa-se o mesmo módulo `runtime.daemon`; nenhum
+serviço de sistema adicional é exigido pelo repositório.
+
+Para testar uma leitura manual com modo `runtime` e hardware conectado:
+
+```bash
+PYTHONPATH=/opt/tcc python3 -m runtime.daemon --config /etc/tcc/runtime.conf --once
+```
+
+Depois de treinar e copiar o modelo, altere `TCC_MODE` para `runtime` e use
+`/etc/init.d/S98tcc-runtime restart` ou reinicie o Raspberry Pi. Para voltar ao modo de campanha,
+interrompa o serviço, restaure `TCC_MODE=manual` e inicie-o novamente. O serviço Buildroot é
+condicionado à configuração e não depende do FN990 para manter o hotspot/SSH ativos.
+`/data/tcc/runtime/latest_position.json` contém a posição mais recente e
+`/data/tcc/runtime/history.jsonl` registra a indisponibilidade inicial, mudanças de estado e
+tentativas de inferência; não registra cada espera de poucos segundos. Durante campanhas,
+mantenha `TCC_MODE=manual` e use `campaign_tools`; a coleta nunca começa automaticamente.
 
 **Pendências:** o driver USB serial, o VID/PID e a porta AT do FN990 ainda dependem de validação
-(`lsusb`/`dmesg` no Raspberry Pi), e `TCC_AT_PORT` fica vazio até lá. **A imagem ainda não foi
-compilada nem validada** (defconfig, build, `sdcard.img`, boot e hardware pendentes).
+(`lsusb`/`dmesg` no Raspberry Pi), e `TCC_AT_PORT` fica vazio até lá. **A imagem ainda não foi compilada nem validada** (defconfig,
+build, `sdcard.img`, hotspot, Dropbear, boot e hardware pendentes).
 
 ---
 
