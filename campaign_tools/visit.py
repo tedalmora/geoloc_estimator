@@ -13,7 +13,7 @@ from pathlib import Path
 from coletor import db as coletor_db
 from estimador.geometry import validate_lat_lon
 
-from . import monitor
+from . import config, monitor, prepare
 from .reference import (
     FIX_COUNT, MAX_ATTEMPTS, add_canonical, compare_reference, distance_m, parse_fix,
     read_canonical, summarize_fixes,
@@ -335,7 +335,7 @@ def run_visit(args, input_fn=input, sleep=time.sleep):
     previous_session_id = _max_session_id(args.db)
     command = [
         sys.executable, "-m", "coletor.daemon", "continuous", "--port", args.port,
-        "--db", args.db, "--scenario", "estatico", "--environment", "outdoor",
+        "--db", args.db, "--scenario", "estatico", "--environment", getattr(args, "environment", "outdoor"),
         "--reference-point", args.point, "--campaign-plmn", args.plmn,
         "--notes", f"campaign_tools:{args.system}:{args.point}:{args.session}",
         "--interval", str(args.interval_s), "--max-measurements", "3",
@@ -354,25 +354,51 @@ def run_visit(args, input_fn=input, sleep=time.sleep):
 
 def _main(argv=None):
     parser = argparse.ArgumentParser(description="Executa uma visita supervisionada de um ponto da campanha.")
-    parser.add_argument("--system", choices=("raspberrypi_os", "buildroot"), required=True)
-    parser.add_argument("--point", choices=tuple(f"P{i:02d}" for i in range(1, 9)), required=True)
+    parser.add_argument("--config", help="arquivo tcc-location.conf")
+    parser.add_argument("--campaign", help="nome da coleta preparada ou caminho do collection.conf")
+    parser.add_argument("--system", choices=config.SYSTEMS)
+    parser.add_argument("--environment", choices=config.ENVIRONMENTS)
+    parser.add_argument("--point", choices=prepare.VALID_POINTS, required=True)
     parser.add_argument("--session", choices=("S1", "S2"), required=True)
-    parser.add_argument("--db", required=True)
-    parser.add_argument("--port", required=True)
-    parser.add_argument("--plmn", required=True)
-    parser.add_argument("--results", required=True)
+    parser.add_argument("--db", help="obrigatorio sem --campaign")
+    parser.add_argument("--port")
+    parser.add_argument("--plmn")
+    parser.add_argument("--results", help="obrigatorio sem --campaign")
     parser.add_argument("--canonical")
     parser.add_argument("--data-dir")
-    parser.add_argument("--interval-s", type=float, default=240)
+    parser.add_argument("--interval-s", type=float)
     parser.add_argument("--phone-lat")
     parser.add_argument("--phone-lon")
     parser.add_argument("--phone-accuracy-m")
     parser.add_argument("--phone-app")
     parser.add_argument("--phone-time")
     args = parser.parse_args(argv)
-    if not math.isfinite(args.interval_s) or args.interval_s <= 0:
-        parser.error("--interval-s precisa ser positivo")
     try:
+        path = config.find_config(args.config)
+        values = {} if path is None else config.load_config(path)
+        for key in config.FIELDS:
+            if getattr(args, key) is None and key in values:
+                setattr(args, key, values[key])
+        if args.campaign is not None:
+            collection = prepare.load_collection(prepare.resolve_collection(args.campaign, args.data_dir))
+            if args.point not in collection["points"]:
+                raise ValueError(
+                    f"{args.point} nao pertence a coleta {collection['name']}: {','.join(collection['points'])}"
+                )
+            for key in ("db", "results", "canonical"):
+                if getattr(args, key) is None:
+                    setattr(args, key, collection[key])
+        for key in ("system", "port", "plmn", "db", "results"):
+            if getattr(args, key) is None:
+                parser.error(f"--{key} obrigatorio sem valor na configuracao ou na coleta")
+        if args.interval_s is None:
+            args.interval_s = 240
+        if args.environment is None:
+            args.environment = "outdoor"
+        config.validate_config({
+            key: str(getattr(args, key)) for key in config.FIELDS if getattr(args, key) is not None
+        })
+        args.interval_s = float(args.interval_s)
         run_visit(args)
     except (EOFError, OSError, RuntimeError, ValueError) as exc:
         print(f"ERRO: {exc}", file=sys.stderr)

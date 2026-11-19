@@ -4,6 +4,7 @@ import argparse
 import csv
 import math
 import statistics
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -155,14 +156,18 @@ def compare_reference(summary, canonical, minimum_distance_m=20.0, spread_factor
     }
 
 
-def separation_rows(references, minimum_distance_m=20.0, spread_factor=3.0):
-    missing = sorted(set(POINTS) - set(references))
+def separation_rows(references, points=None, minimum_distance_m=20.0, spread_factor=3.0):
+    """Pairwise separation; points=None keeps the full P01-P08 campaign for compatibility."""
+    selected = POINTS if points is None else tuple(points)
+    if len(selected) < 2 or len(set(selected)) != len(selected):
+        raise ValueError("separação exige ao menos dois pontos distintos")
+    missing = [point for point in selected if point not in references]
     if missing:
         raise ValueError(f"referências canônicas ausentes para: {', '.join(missing)}")
     rows = []
-    for index, point_a in enumerate(POINTS):
+    for index, point_a in enumerate(selected):
         a = references[point_a]
-        for point_b in POINTS[index + 1:]:
+        for point_b in selected[index + 1:]:
             b = references[point_b]
             distance = distance_m(a["lat"], a["lon"], b["lat"], b["lon"])
             spread = max(a["uncertainty_m"], b["uncertainty_m"])
@@ -179,17 +184,48 @@ def separation_rows(references, minimum_distance_m=20.0, spread_factor=3.0):
 def _main(argv=None):
     parser = argparse.ArgumentParser(description="Verifica a separação espacial das referências canônicas.")
     sub = parser.add_subparsers(dest="command", required=True)
-    separation = sub.add_parser("separation", help="calcula distâncias entre P01 e P08")
-    separation.add_argument("--canonical", required=True)
-    separation.add_argument("--out", required=True)
+    separation = sub.add_parser(
+        "separation", help="calcula distâncias entre P01 e P08 ou entre os pontos de uma coleta",
+    )
+    separation.add_argument("--campaign", help="nome da coleta ou caminho do collection.conf")
+    separation.add_argument("--config", help="arquivo tcc-location.conf (com --campaign)")
+    separation.add_argument("--canonical", help="obrigatório sem --campaign")
+    separation.add_argument("--out", help="obrigatório sem --campaign; padrão <results>/separacao_pontos.csv")
     separation.add_argument("--minimum-distance-m", type=float, default=20.0)
     separation.add_argument("--spread-factor", type=float, default=3.0)
     args = parser.parse_args(argv)
     if (not math.isfinite(args.minimum_distance_m) or args.minimum_distance_m < 0 or
             not math.isfinite(args.spread_factor) or args.spread_factor <= 0):
         parser.error("limites precisam ser não negativos e o fator precisa ser positivo")
-    rows = separation_rows(read_canonical(args.canonical), args.minimum_distance_m, args.spread_factor)
+    points = None
+    if args.campaign is None:
+        if args.canonical is None or args.out is None:
+            parser.error("sem --campaign, --canonical e --out são obrigatórios")
+    else:
+        from .check import load_target
+
+        try:
+            collection = load_target(args.campaign, args.config)
+        except (OSError, ValueError) as exc:
+            print(f"ERRO: {exc}", file=sys.stderr)
+            return 1
+        points = collection["points"]
+        args.canonical = args.canonical or collection["canonical"]
+        args.out = args.out or str(Path(collection["results"]) / "separacao_pontos.csv")
+    try:
+        rows = separation_rows(
+            read_canonical(args.canonical), points,
+            minimum_distance_m=args.minimum_distance_m, spread_factor=args.spread_factor,
+        )
+    except (OSError, ValueError) as exc:
+        if points is None:
+            raise
+        print(f"ERRO: {exc}", file=sys.stderr)
+        return 1
     target = Path(args.out)
+    if points is not None and target.exists():
+        print(f"ERRO: {target}: já existe; não será sobrescrito", file=sys.stderr)
+        return 1
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("x", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=tuple(rows[0]))

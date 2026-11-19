@@ -31,7 +31,10 @@ def _git_metadata(root):
 
 def create_manifest(output, campaign_id, system, operator, db_path, plmn, port,
                     interval_s, antenna_height_m, orientation, weather="nao_informado",
-                    buildroot_image_sha256="nao_informado", phone_used="nao", root=None):
+                    buildroot_image_sha256="nao_informado", phone_used="nao", root=None,
+                    planned_points=8):
+    if isinstance(planned_points, bool) or not isinstance(planned_points, int) or not 1 <= planned_points <= 8:
+        raise ValueError("pontos planejados precisam estar entre 1 e 8")
     if (not math.isfinite(interval_s) or interval_s <= 0 or
             not math.isfinite(antenna_height_m) or antenna_height_m < 0):
         raise ValueError("intervalo precisa ser positivo e altura não pode ser negativa")
@@ -66,7 +69,7 @@ def create_manifest(output, campaign_id, system, operator, db_path, plmn, port,
         ("antenna_height_m", antenna_height_m),
         ("antenna_orientation", orientation),
         ("weather", weather or "nao_informado"),
-        ("planned_points", 8),
+        ("planned_points", planned_points),
         ("sessions_per_point", 2),
         ("measurements_per_session", 3),
         ("valid_gnss_fixes_per_reference", 5),
@@ -93,11 +96,12 @@ def _main(argv=None):
     parser.add_argument("--buildroot-image-sha256", default="nao_informado")
     parser.add_argument("--phone-used", choices=("sim", "nao"), default="nao")
     parser.add_argument("--root")
+    parser.add_argument("--planned-points", type=int, default=8)
     args = parser.parse_args(argv)
     create_manifest(
         args.output, args.campaign_id, args.system, args.operator, args.db, args.plmn,
         args.port, args.interval_s, args.antenna_height_m, args.orientation, args.weather,
-        args.buildroot_image_sha256, args.phone_used, args.root,
+        args.buildroot_image_sha256, args.phone_used, args.root, args.planned_points,
     )
     print(f"Manifesto criado: {args.output}")
     return 0
