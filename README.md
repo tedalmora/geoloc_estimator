@@ -338,9 +338,17 @@ O Cell-ID devolve a posição cadastrada da célula servidora (busca pela `globa
 [`estimador/README.md`](estimador/README.md).**
 
 ```bash
-# treino (spatial = grupo por ponto de referência; temporal = grupo por sessão)
+# fluxo normal de uma campanha já adquirida (campaign_tools.check aprovado): treina e avalia
+# spatial e temporal e treina o complete (todos os dados elegíveis, sem avaliação independente)
+python -m campaign_tools.wknn train --campaign preliminar-interna
+# depois de revisar as avaliações: copia o bundle (padrão: complete) para modelos/deployed/
+python -m campaign_tools.wknn deploy --campaign preliminar-interna            # --model spatial|temporal
+
+# comandos técnicos individuais (reprodução detalhada)
+# treino (spatial = grupo por ponto de referência; temporal = grupo por sessão; complete = sem teste)
 python -m estimador.train --db radiomapa_v2.db --technology LTE --protocol spatial --out modelos/wknn_lte_spatial.json
 python -m estimador.train --db radiomapa_v2.db --technology LTE --protocol temporal --out modelos/wknn_lte_temporal.json
+python -m estimador.train --db radiomapa_v2.db --technology LTE --protocol complete --out modelos/wknn_lte_complete.json
 
 # WKNN e Cell-ID em todas as tentativas dos grupos de teste do bundle; validação do cadastro
 python -m estimador.evaluate compare --db radiomapa_v2.db --model modelos/wknn_lte_spatial.json \

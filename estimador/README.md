@@ -64,7 +64,19 @@ generalização temporal: as métricas saem separadas em `known_points` e `new_p
 (`test_metrics_by_point_type`), com aviso. Se a referência de um ponto do teste for a mediana
 GNSS com fixes de várias sessões (inclusive de treino), o resultado não tem independência
 temporal completa, e o relatório avisa.
-Os protocolos não são equivalentes: compare resultados só dentro do mesmo protocolo.
+Os protocolos spatial e temporal não são equivalentes: compare resultados só dentro do mesmo protocolo.
+
+Protocolo `complete` (modelo operacional): usa todas as amostras elegíveis (grupos de seleção por
+sessão), sem grupo de teste. Os hiperparâmetros vêm da mesma validação cruzada agrupada, sobre todos
+os grupos (`hyperparameter_source = grouped_cv_all_eligible`), e as métricas dessa validação não são
+gravadas. O bundle tem o formato v2 de sempre, com `protocol = complete`, `evaluation_available =
+false` e `dataset.training_samples_sha256`; não há `test_*`. `estimador.evaluate compare` o recusa
+("modelo complete não possui conjunto de teste independente"); `estimador.live wknn` o carrega
+normalmente. Mínimo técnico: 3 sessões com amostras elegíveis.
+
+Por campanha, `python -m campaign_tools.wknn train|deploy --campaign NOME` executa os três treinos
+(e a avaliação de spatial e temporal) e seleciona o bundle para teste posterior (padrão: `complete`);
+ver o roteiro 04, seção 12.
 
 ## Bundle WKNN
 
@@ -93,11 +105,13 @@ de `methods/cell_id.py`. Estados do Cell-ID: `valid`, `unknown_cell`,
 ## Comandos (a partir de `codigo/`)
 
 ```bash
-# treino: um bundle por tecnologia e protocolo
+# treino: um bundle por tecnologia e protocolo (complete = todas as amostras elegíveis, sem teste)
 python -m estimador.train --db radiomapa_v2.db --technology LTE --protocol spatial \
     --out modelos/wknn_lte_spatial.json --report modelos/wknn_lte_spatial_relatorio.json
 python -m estimador.train --db radiomapa_v2.db --technology LTE --protocol temporal \
     --out modelos/wknn_lte_temporal.json
+python -m estimador.train --db radiomapa_v2.db --technology LTE --protocol complete \
+    --out modelos/wknn_lte_complete.json
 
 # WKNN e Cell-ID em todas as tentativas dos grupos de teste do bundle
 python -m estimador.evaluate compare --db radiomapa_v2.db --model modelos/wknn_lte_spatial.json \

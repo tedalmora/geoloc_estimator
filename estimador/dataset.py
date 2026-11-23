@@ -32,7 +32,9 @@ from .geometry import haversine_m
 
 PROTOCOL_SPATIAL = "spatial"
 PROTOCOL_TEMPORAL = "temporal"
+PROTOCOL_COMPLETE = "complete"  # modelo operacional: todas as amostras elegíveis, sem grupo de teste
 PROTOCOLS = (PROTOCOL_SPATIAL, PROTOCOL_TEMPORAL)
+TRAIN_PROTOCOLS = PROTOCOLS + (PROTOCOL_COMPLETE,)
 GROUP_COLUMN = {PROTOCOL_SPATIAL: "reference_point_id", PROTOCOL_TEMPORAL: "session_id"}
 
 REF_REGISTERED = "reference_point"
@@ -319,6 +321,11 @@ def make_group_split(
         start = {s.session_id: s.session_started_at for s in samples}
         test = sorted(sorted(groups, key=lambda g: (start[g], g))[-n_test:])
     selection = [g for g in groups if g not in test]
+    folds = _make_folds(protocol, selection, sizes, n_folds)
+    return GroupSplit(protocol, tuple(test), tuple(selection), folds, ungrouped)
+
+
+def _make_folds(protocol: str, selection: Sequence[int], sizes: Counter, n_folds: int):
     k = min(n_folds, len(selection))
     members: List[List[int]] = [[] for _ in range(k)]
     loads = [0] * k
@@ -334,7 +341,24 @@ def make_group_split(
             f"insufficient_groups: fold(s) {short} sem 2 grupos de treino e 1 de validação; use mais folds (--folds) "
             "ou colete mais grupos.",
         )
-    return GroupSplit(protocol, tuple(test), tuple(selection), folds, ungrouped)
+    return folds
+
+
+def make_selection_split(samples: Sequence[Sample], protocol: str, n_folds: int = 5) -> GroupSplit:
+    """Folds de seleção com todos os grupos e nenhum grupo de teste (modelo complete)."""
+    if protocol not in PROTOCOLS or n_folds < 2:
+        raise ValueError("protocolo desconhecido ou n_folds < 2")
+    sizes = Counter(s.group(protocol) for s in samples if s.group(protocol) is not None)
+    groups = sorted(sizes)
+    if len(groups) < MIN_SELECTION_GROUPS:
+        raise DatasetError(
+            f"{protocol}_validation_unavailable",
+            f"insufficient_groups: {len(groups)} grupo(s) com amostras rotuladas ({GROUP_COLUMN[protocol]}); mínimo "
+            f"técnico {MIN_SELECTION_GROUPS} para a seleção de hiperparâmetros, com ao menos 2 grupos de treino em "
+            "cada fold.",
+        )
+    ungrouped = sum(1 for s in samples if s.group(protocol) is None)
+    return GroupSplit(protocol, (), tuple(groups), _make_folds(protocol, groups, sizes, n_folds), ungrouped)
 
 
 def samples_in_groups(samples: Sequence[Sample], protocol: str, groups: Sequence[int]) -> List[Sample]:

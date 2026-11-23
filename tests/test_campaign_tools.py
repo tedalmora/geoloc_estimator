@@ -1,6 +1,7 @@
 import csv
 import hashlib
 import json
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -10,7 +11,7 @@ from unittest.mock import Mock, call
 
 import pytest
 
-from campaign_tools import check, config, configure, export, manifest, monitor, prepare, reference, visit
+from campaign_tools import check, config, configure, export, manifest, monitor, prepare, reference, visit, wknn
 from coletor import db
 from hal.models import CellObservation, GnssFix, GnssReading, PrepareResult, ServInfoReading
 
@@ -1085,3 +1086,236 @@ def test_s2_cannot_repeat_existing_visit(tmp_path, monkeypatch, existing):
     with pytest.raises(FileExistsError):
         visit.run_visit(args, input_fn=lambda _: "OK", sleep=lambda _: None)
     assert (results / "referencias" / "P01_S2_fixes.csv").read_text(encoding="utf-8") == "old S2\n"
+
+
+def _trainable_collection(tmp_path, monkeypatch, points=FOUR_POINTS):
+    results, db_path = _acquired_collection(tmp_path, monkeypatch, points)
+    conn = sqlite3.connect(str(db_path))
+    for measurement_id, seq, point_id in conn.execute(
+        "SELECT measurement_id, seq, reference_point_id FROM measurements"
+    ).fetchall():
+        for index in range(3):
+            arfcn, pci, cell_id = 3000 + index, 10 + index, f"{index + 1:X}"
+            conn.execute(
+                "INSERT INTO observed_cells (measurement_id, source, rat, arfcn, pci, plmn, cell_id, rsrp_dbm, "
+                "cell_status, record_format, radio_key, global_cell_key, identity_status) VALUES "
+                "(?, 'CSURV', 'LTE', ?, ?, '72406', ?, ?, 'CELL_SUITABLE', 'full', ?, ?, 'complete')",
+                (measurement_id, arfcn, pci, cell_id, -60.0 - 8 * index - 6 * abs(point_id - 1 - index) - seq,
+                 f"LTE:{arfcn}:{pci}", f"LTE|72406|{cell_id}"),
+            )
+    conn.commit()
+    conn.close()
+    return results, db_path
+
+
+def _wknn(capsys, *argv):
+    code = wknn._main(list(argv))
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def _tree_bytes(root):
+    return {path: path.read_bytes() for path in Path(root).rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("by_path", [False, True])
+def test_wknn_train_resolves_collection_and_writes_only_inside_it(tmp_path, monkeypatch, capsys, by_path):
+    results, db_path = _trainable_collection(tmp_path, monkeypatch)
+    campaign = str(results / prepare.COLLECTION_NAME) if by_path else "coleta"
+    raw = {path: path.read_bytes() for path in (db_path, results / "collection.conf", results / "referencias_canonicas.csv")}
+    before = set(_tree_bytes(tmp_path))
+    code, out, err = _wknn(capsys, "train", "--campaign", campaign)
+    assert code == 0, err
+    created = set(_tree_bytes(tmp_path)) - before
+    assert all(results in path.parents for path in created)
+    models = results / "modelos"
+    assert {path.name for path in models.iterdir()} == {
+        f"{kind}_lte_{protocol}.json" for kind in ("wknn", "treino") for protocol in wknn.MODEL_PROTOCOLS}
+    for protocol in ("spatial", "temporal"):
+        assert {p.name for p in (results / "avaliacoes" / protocol).iterdir()} == {
+            "resumo.csv", "predicoes.csv", "avaliacao.json"}
+    assert [p.name for p in (results / "avaliacoes" / "complete").iterdir()] == ["resumo.json"]
+    assert all(path.read_bytes() == content for path, content in raw.items())
+    assert "Tentativas: 24\nComplete: 24\nPartial: 0\nInvalid: 0\nElegiveis: 24" in out
+    assert "Complete:\n- treinado com todos os fingerprints elegiveis; nao possui avaliacao independente" in out
+    assert "NR:\n- nao treinado: dados elegiveis insuficientes" in out
+    assert "python -m campaign_tools.wknn deploy --campaign" in out
+
+
+def test_wknn_complete_summary_has_only_training_facts(tmp_path, monkeypatch, capsys):
+    results, _ = _trainable_collection(tmp_path, monkeypatch)
+    assert _wknn(capsys, "train", "--campaign", "coleta")[0] == 0
+    summary = json.loads((results / "avaliacoes" / "complete" / "resumo.json").read_text(encoding="utf-8"))
+    bundle = json.loads((results / "modelos" / "wknn_lte_complete.json").read_text(encoding="utf-8"))
+    assert (summary["protocol"], summary["evaluation_available"]) == ("complete", False)
+    assert summary["n_eligible_fingerprints"] == 24 == len(bundle["fingerprints"]["measurement_id"])
+    assert summary["n_attempts_considered"] == 24 and summary["points"] == list(FOUR_POINTS)
+    assert len(summary["session_ids"]) == 8 and summary["hyperparameter_source"] == "grouped_cv_all_eligible"
+    assert not {"mean_m", "rmse_m", "p90_m", "p95_m", "coverage"} & set(summary)
+    assert "dataset" in bundle and "test_samples_sha256" not in bundle["dataset"]
+    assert (bundle["protocol"], bundle["evaluation_available"]) == ("complete", False)
+    assert (results / "avaliacoes" / "spatial" / "avaliacao.json").read_text(encoding="utf-8")
+
+
+def test_wknn_train_calls_training_and_evaluation_in_order(tmp_path, monkeypatch, capsys):
+    results, db_path = _trainable_collection(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(wknn.train, "main", lambda argv: calls.append(("train", argv)) or Path(
+        argv[argv.index("--out") + 1]).write_text("{}", encoding="utf-8"))
+    monkeypatch.setattr(wknn.evaluate, "main", lambda argv: calls.append(("evaluate", argv)) or Path(
+        argv[argv.index("--json-out") + 1]).write_text(json.dumps(
+            {"group_column": "g", "test_groups": [1], "methods": {"wknn": {
+                "n_valid": 1, "n_attempts": 1, "operational_coverage": 1.0, "mean_m": 1.0, "median_m": 1.0,
+                "rmse_m": 1.0, "p90_m": 1.0, "p95_m": 1.0}}}), encoding="utf-8"))
+    monkeypatch.setattr(wknn, "_complete_summary", lambda *args: {"protocol": "complete"})
+    assert _wknn(capsys, "train", "--campaign", "coleta")[0] == 0
+    assert [(kind, argv[argv.index("--protocol") + 1] if kind == "train" else argv[argv.index("--model") + 1])
+            for kind, argv in calls] == [
+        ("train", "spatial"), ("evaluate", str(results / "modelos" / "wknn_lte_spatial.json")),
+        ("train", "temporal"), ("evaluate", str(results / "modelos" / "wknn_lte_temporal.json")),
+        ("train", "complete")]
+    train_argv = calls[0][1]
+    assert train_argv[train_argv.index("--db") + 1] == str(db_path)
+    assert train_argv[train_argv.index("--campaign-plmn") + 1] == "72406"
+    assert train_argv[train_argv.index("--report") + 1] == str(results / "modelos" / "treino_lte_spatial.json")
+    evaluate_argv = calls[1][1]
+    assert evaluate_argv[evaluate_argv.index("--json-out") + 1] == str(results / "avaliacoes" / "spatial" / "avaliacao.json")
+
+
+def test_wknn_partial_follows_existing_eligibility_and_invalid_blocks(tmp_path, monkeypatch, capsys):
+    results, db_path = _trainable_collection(tmp_path, monkeypatch)
+    _session_sql(db_path, "UPDATE measurements SET snapshot_status='partial' WHERE measurement_id IN (1, 2);"
+                          "UPDATE measurements SET csurv_status='empty' WHERE measurement_id = 2;"
+                          "DELETE FROM observed_cells WHERE measurement_id = 2")
+    code, out, err = _wknn(capsys, "train", "--campaign", "coleta")
+    assert code == 0, err
+    assert "Complete: 22\nPartial: 2\nInvalid: 0\nElegiveis: 23" in out  # só o partial com #CSURV e células entra
+    shutil.rmtree(results / "modelos")
+    shutil.rmtree(results / "avaliacoes")
+    (results / "modelos").mkdir()
+    (results / "avaliacoes").mkdir()
+    _session_sql(db_path, "UPDATE measurements SET snapshot_status='invalid' WHERE measurement_id = 3")
+    code, out, err = _wknn(capsys, "train", "--campaign", "coleta")
+    assert code == 1 and "invalid" in err and "Treino nao concluido" in err
+    assert not any((results / "modelos").iterdir()) and not any((results / "avaliacoes").iterdir())
+
+
+def test_wknn_nr_without_eligible_data_fails_and_lte_is_not_affected(tmp_path, monkeypatch, capsys):
+    results, _ = _trainable_collection(tmp_path, monkeypatch)
+    code, out, err = _wknn(capsys, "train", "--campaign", "coleta", "--technology", "NR")
+    assert code == 1 and "NR nao treinado: dados elegiveis insuficientes" in err
+    assert not any((results / "modelos").iterdir()) and not any((results / "avaliacoes").iterdir())
+    assert _wknn(capsys, "train", "--campaign", "coleta")[0] == 0
+
+
+def test_wknn_refuses_overwrite_and_force_replaces_only_derived_artifacts(tmp_path, monkeypatch, capsys):
+    results, db_path = _trainable_collection(tmp_path, monkeypatch)
+    assert _wknn(capsys, "train", "--campaign", "coleta")[0] == 0
+    (results / "export" / "sessoes.csv").write_text("keep\n", encoding="utf-8")
+    (results / "avaliacoes" / "notas.txt").write_text("keep\n", encoding="utf-8")
+    (results / "avaliacoes" / "spatial" / "extra.txt").write_text("derived\n", encoding="utf-8")
+    (results / "modelos" / "deployed").mkdir()
+    (results / "modelos" / "deployed" / "wknn_lte.json").write_text("keep\n", encoding="utf-8")
+    before = _tree_bytes(results)
+    code, out, err = _wknn(capsys, "train", "--campaign", "coleta")
+    assert code == 1 and "--force" in err and _tree_bytes(results) == before
+    code, out, err = _wknn(capsys, "train", "--campaign", "coleta", "--force")
+    assert code == 0, err
+    after = _tree_bytes(results)
+    derived_dirs = {results / "avaliacoes" / protocol for protocol in wknn.MODEL_PROTOCOLS}
+
+    def derived(path):
+        return path.parent in derived_dirs or (
+            path.parent == results / "modelos" and path.name.startswith(("wknn_lte_", "treino_lte_")))
+
+    assert any(not derived(path) for path in before)
+    for path, content in before.items():
+        if not derived(path):
+            assert after[path] == content, path
+    assert not (results / "avaliacoes" / "spatial" / "extra.txt").exists()
+
+
+def test_wknn_intermediate_failure_never_reports_success(tmp_path, monkeypatch, capsys):
+    results, _ = _trainable_collection(tmp_path, monkeypatch)
+    real = wknn.evaluate.main
+
+    def failing(argv):
+        if "wknn_lte_temporal.json" in " ".join(argv):
+            raise SystemExit("erro: avaliacao indisponivel")
+        return real(argv)
+
+    monkeypatch.setattr(wknn.evaluate, "main", failing)
+    code, out, err = _wknn(capsys, "train", "--campaign", "coleta")
+    assert code == 1 and "etapa 'avaliacao LTE temporal' falhou" in err and "Treino nao concluido" in err
+    assert "Proximo comando" not in out and "Complete:\n-" not in out
+    assert not (results / "modelos" / "wknn_lte_complete.json").exists()
+    assert not (results / "modelos" / "deployed").exists()
+
+
+@pytest.fixture
+def trained(tmp_path, monkeypatch, capsys):
+    results, _ = _trainable_collection(tmp_path, monkeypatch)
+    assert _wknn(capsys, "train", "--campaign", "coleta")[0] == 0
+    return results
+
+
+@pytest.mark.parametrize("model", [None, "spatial", "temporal", "complete"])
+def test_wknn_deploy_selects_model_and_registers_it(trained, tmp_path, capsys, model):
+    runtime_conf = tmp_path / "runtime.conf"
+    runtime_conf.write_text("TCC_MODE=manual\n", encoding="utf-8")
+    args = ["deploy", "--campaign", "coleta"] + ([] if model is None else ["--model", model])
+    code, out, err = _wknn(capsys, *args)
+    assert code == 0, err
+    selected = model or "complete"
+    source = trained / "modelos" / f"wknn_lte_{selected}.json"
+    deployed = trained / "modelos" / "deployed" / "wknn_lte.json"
+    record = json.loads((trained / "modelos" / "deployed" / "deployment.json").read_text(encoding="utf-8"))
+    assert deployed.read_bytes() == source.read_bytes()
+    bundle = json.loads(source.read_text(encoding="utf-8"))
+    assert record == {
+        "campaign": "coleta", "technology": "LTE", "selected_model": selected, "source_bundle": str(source),
+        "source_bundle_sha256": hashlib.sha256(source.read_bytes()).hexdigest(), "deployed_bundle": str(deployed),
+        "deployed_utc": record["deployed_utc"], "protocol": selected,
+        "evaluation_available": selected != "complete",
+        "training_data_hash": bundle["dataset"].get("training_samples_sha256") or bundle["dataset"]["selection_samples_sha256"],
+    }
+    assert record["training_data_hash"] and datetime_is_utc(record["deployed_utc"])
+    assert runtime_conf.read_text(encoding="utf-8") == "TCC_MODE=manual\n"
+    for protocol in wknn.MODEL_PROTOCOLS:
+        assert (trained / "modelos" / f"wknn_lte_{protocol}.json").is_file()
+    assert not list((trained / "modelos" / "deployed").glob("*.tmp"))
+
+
+def datetime_is_utc(text):
+    from datetime import datetime
+    return datetime.fromisoformat(text).utcoffset().total_seconds() == 0
+
+
+def test_wknn_deploy_copy_is_atomic_and_keeps_previous_bundle_on_failure(trained, monkeypatch, capsys):
+    assert _wknn(capsys, "deploy", "--campaign", "coleta")[0] == 0
+    deployed = trained / "modelos" / "deployed" / "wknn_lte.json"
+    previous = deployed.read_bytes()
+    replaced = []
+    real_replace = wknn.os.replace
+
+    def spy(source, target):
+        replaced.append((Path(source), Path(target)))
+        raise OSError("falha simulada")
+
+    monkeypatch.setattr(wknn.os, "replace", spy)
+    code, out, err = _wknn(capsys, "deploy", "--campaign", "coleta", "--model", "temporal")
+    assert code == 1 and "falha simulada" in err
+    assert deployed.read_bytes() == previous and not list(deployed.parent.glob("*.tmp"))
+    assert replaced[0][0].parent == replaced[0][1].parent and replaced[0][0].suffix == ".tmp"
+    monkeypatch.setattr(wknn.os, "replace", real_replace)
+    assert _wknn(capsys, "deploy", "--campaign", "coleta", "--model", "temporal")[0] == 0
+    assert deployed.read_bytes() == (trained / "modelos" / "wknn_lte_temporal.json").read_bytes()
+
+
+def test_wknn_deploy_does_not_touch_hardware_and_needs_a_trained_bundle(tmp_path, monkeypatch, capsys):
+    results, _ = _trainable_collection(tmp_path, monkeypatch)
+    from hal.fn990_driver import FN990Driver
+    monkeypatch.setattr(FN990Driver, "connect", lambda *a, **k: pytest.fail("deploy nao acessa o modem"))
+    code, out, err = _wknn(capsys, "deploy", "--campaign", "coleta")
+    assert code == 1 and "execute 'campaign_tools.wknn train' antes" in err
+    assert not (results / "modelos" / "deployed").exists()

@@ -16,6 +16,12 @@ cadastradas) e avisos de variância alta, referência exploratória ou compartil
 O teste é separado por tipo de ponto: no protocolo temporal, pontos sem amostras no treino
 (extrapolação espacial) não se misturam aos pontos conhecidos (generalização temporal).
 
+Protocolo `complete` (modelo operacional): usa todas as amostras elegíveis, sem grupo de teste. Os
+hiperparâmetros vêm da mesma seleção por validação cruzada agrupada por sessão, sobre todos os
+grupos (`hyperparameter_source = grouped_cv_all_eligible`); suas métricas não são gravadas. O bundle
+tem o mesmo formato v2, com `protocol = complete` e `evaluation_available = false`; não há hash nem
+medições de teste, e `estimador.evaluate` recusa a avaliação offline.
+
 Uso (a partir de `codigo/`):
     python -m estimador.train --db radiomapa_v2.db --technology LTE --protocol spatial \\
         --out modelos/wknn_lte_spatial.json [--campaign-plmn 72406] [--report relatorio_lte_spatial.json]
@@ -40,12 +46,16 @@ from .dataset import (
     POINT_KNOWN,
     POINT_NEW,
     POINT_NONE,
+    PROTOCOL_COMPLETE,
+    PROTOCOL_TEMPORAL,
     PROTOCOLS,
+    TRAIN_PROTOCOLS,
     DatasetError,
     Sample,
     group_sizes,
     load_dataset,
     make_group_split,
+    make_selection_split,
     point_type_warnings,
     reference_summary,
     reference_warnings,
@@ -85,6 +95,13 @@ from .methods.fingerprint import (
 
 DEFAULT_K = (1, 3, 5, 7, 9)
 DEFAULT_MISSING = ("sentinel:-140", "floor_offset:10")
+HYPERPARAMETER_SOURCE_CV = "grouped_cv_all_eligible"
+COMPLETE_LIMITATIONS = [
+    "sem conjunto de teste independente: não há erro de generalização",
+    "hiperparâmetros escolhidos por validação cruzada agrupada por sessão sobre os mesmos dados; as métricas dessa "
+    "validação não são relatadas",
+    "o desempenho deste modelo só pode ser medido com leituras novas (estimador.live) ou nova coleta",
+]
 
 
 @dataclass(frozen=True)
@@ -244,12 +261,59 @@ def evaluate_model(model: WknnModel, samples: Sequence[Sample]) -> dict:
     return {**error_summary(errors, n_total=len(samples)), "status_counts": dict(sorted(statuses.items()))}
 
 
+def _train_complete(dataset, policy: CellFilterPolicy, db_path: str, out_path: str, grid: Grid,
+                    n_folds: int) -> Tuple[dict, dict]:
+    """Modelo operacional: todas as amostras elegíveis, sem grupo de teste e sem métricas de erro.
+
+    Os hiperparâmetros vêm da mesma seleção por validação cruzada agrupada por sessão (`select_candidate`),
+    só que sobre todos os grupos; as métricas dessa validação não são gravadas.
+    """
+    samples, not_eligible = eligible_samples(dataset.samples, PROTOCOL_TEMPORAL, policy)
+    split = make_selection_split(samples, PROTOCOL_TEMPORAL, n_folds)
+    best, _, details = select_candidate(samples, split, policy, grid)
+    bundle = build_bundle(samples, policy, best, PROTOCOL_COMPLETE)
+    bundle["software_version"] = software_version()
+    bundle["reference_policy"] = dataset.reference_policy()
+    bundle["evaluation_available"] = False
+    bundle["hyperparameter_source"] = HYPERPARAMETER_SOURCE_CV
+    known_points = sorted({s.reference_point_id for s in samples if s.reference_point_id is not None})
+    digest = samples_sha256(samples)
+    bundle["training_groups"] = {"protocol": PROTOCOL_COMPLETE, "group_column": GROUP_COLUMN[PROTOCOL_TEMPORAL],
+                                 "groups": group_sizes(samples, PROTOCOL_TEMPORAL, split.selection_groups),
+                                 "n_samples": len(samples), "reference_point_ids": known_points}
+    bundle["dataset"] = {
+        "source_db": os.path.basename(db_path), "schema_version": SCHEMA_VERSION, "n_attempts": len(dataset.attempts),
+        "samples_sha256": digest, "training_samples_sha256": digest, "n_eligible_samples": len(samples),
+        "excluded_from_dataset": dataset.excluded, "excluded_by_protocol_or_policy": not_eligible,
+    }
+    bundle["validation"] = {
+        "evaluation_available": False,
+        "hyperparameter_selection": {
+            "source": HYPERPARAMETER_SOURCE_CV, "protocol": PROTOCOL_TEMPORAL,
+            "group_column": GROUP_COLUMN[PROTOCOL_TEMPORAL], "n_folds": len(split.folds),
+            "folds": split.to_dict()["folds"], "subsets": split_report(samples, split),
+            "grid": {"k": list(grid.k), "metrics": list(grid.metrics), "scalings": list(grid.scalings),
+                     "missing": list(grid.missing)},
+            "criterion": "menor erro médio (m) na validação dos folds; desempate por p90; métricas não gravadas",
+            "chosen": asdict(best), **details,
+        },
+        "reference": reference_summary(samples),
+        "warnings": reference_warnings(samples),
+        "limitations": COMPLETE_LIMITATIONS,
+    }
+    WknnModel(bundle)
+    save_bundle(bundle, out_path)
+    report = {key: value for key, value in bundle.items() if key != "fingerprints"}
+    report["dataset_summary"] = dataset.summary()
+    return bundle, report
+
+
 def train(db_path: str, technology: str, protocol: str, out_path: str, campaign_plmn: Optional[str] = None,
           grid: Grid = Grid(), test_fraction: float = 0.2, n_folds: int = 5, seed: int = 42,
           include_other_plmn: bool = False, include_unknown_plmn: bool = True, include_forbidden: bool = False,
           allow_single_gnss: bool = False) -> Tuple[dict, dict]:
-    """Treina, avalia no teste e salva o bundle. Devolve (bundle, relatório)."""
-    if technology not in TECHNOLOGIES or protocol not in PROTOCOLS:
+    """Treina, avalia no teste e salva o bundle. Devolve (bundle, relatório). `complete` não tem teste."""
+    if technology not in TECHNOLOGIES or protocol not in TRAIN_PROTOCOLS:
         raise ValueError("tecnologia ou protocolo inválido")
     if not out_path.lower().endswith(".json"):
         raise BundleError("o bundle WKNN é salvo em JSON: use a extensão .json")
@@ -258,6 +322,8 @@ def train(db_path: str, technology: str, protocol: str, out_path: str, campaign_
     dataset = load_dataset(db_path, allow_single_gnss=allow_single_gnss)
     policy = CellFilterPolicy(technology, resolve_campaign_plmn(dataset.samples, campaign_plmn),
                               include_other_plmn, include_unknown_plmn, include_forbidden)
+    if protocol == PROTOCOL_COMPLETE:
+        return _train_complete(dataset, policy, db_path, out_path, grid, n_folds)
     samples, not_eligible = eligible_samples(dataset.samples, protocol, policy)
     split = make_group_split(samples, protocol, test_fraction, n_folds, seed)
     selection = samples_in_groups(samples, protocol, split.selection_groups)
@@ -342,6 +408,21 @@ def _print_summary(bundle: dict, report: dict, out_path: str) -> None:
     print(f"Bundle: {out_path}")
 
 
+def _print_summary_complete(bundle: dict, out_path: str) -> None:
+    sel = bundle["validation"]["hyperparameter_selection"]
+    print(f"Protocolo: complete (sem teste independente); tecnologia {bundle['technology']}; "
+          f"PLMN da campanha {bundle['cell_filter_policy']['campaign_plmn']}; software {bundle['software_version']}")
+    print(f"Amostras de treino: {bundle['dataset']['n_eligible_samples']} (todas as elegíveis); "
+          f"{len(bundle['training_groups']['groups'])} sessões; {len(bundle['training_groups']['reference_point_ids'])} "
+          f"pontos; {len(bundle['cell_keys'])} colunas; ausência = {bundle['missing_value']:g} dBm")
+    print(f"Hiperparâmetros: {sel['chosen']} (origem: {bundle['hyperparameter_source']})")
+    for limitation in bundle["validation"]["limitations"]:
+        print(f"LIMITAÇÃO: {limitation}")
+    for warning in bundle["validation"]["warnings"]:
+        print(f"AVISO: {warning}")
+    print(f"Bundle: {out_path}")
+
+
 def _csv(text: str, cast=str) -> Tuple:
     return tuple(cast(item.strip()) for item in text.split(",") if item.strip())
 
@@ -350,8 +431,9 @@ def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description="Treino e seleção do WKNN com validação por grupos (banco v2)")
     parser.add_argument("--db", required=True, help="radiomapa v2 do Coletor (só leitura)")
     parser.add_argument("--technology", required=True, choices=TECHNOLOGIES, help="RAT das células usadas como features")
-    parser.add_argument("--protocol", required=True, choices=PROTOCOLS,
-                        help="spatial: grupo = ponto de referência; temporal: grupo = sessão")
+    parser.add_argument("--protocol", required=True, choices=TRAIN_PROTOCOLS,
+                        help="spatial: grupo = ponto de referência; temporal: grupo = sessão; complete: todas as "
+                             "amostras elegíveis, sem teste (não pode ser avaliado offline)")
     parser.add_argument("--out", required=True, help="bundle novo (.json)")
     parser.add_argument("--campaign-plmn", dest="campaign_plmn")
     parser.add_argument("--k", default=",".join(map(str, DEFAULT_K)))
@@ -380,7 +462,10 @@ def main(argv=None) -> None:
     if args.report:
         with open(args.report, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
-    _print_summary(bundle, report, args.out)
+    if args.protocol == PROTOCOL_COMPLETE:
+        _print_summary_complete(bundle, args.out)
+    else:
+        _print_summary(bundle, report, args.out)
 
 
 if __name__ == "__main__":

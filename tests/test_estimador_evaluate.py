@@ -50,6 +50,16 @@ def test_metricas_de_erro():
     assert (vazio["coverage"], vazio["mean_m"], vazio["cdf_m"]) == (0.0, None, [])
 
 
+def test_compare_recusa_bundle_complete_sem_teste_independente(treinado, tmp_path):
+    banco, _, _ = treinado
+    completo = str(tmp_path / "wknn_lte_complete.json")
+    tr.train(banco, "LTE", "complete", completo, grid=GRADE)
+    with pytest.raises(ev.EvaluationError, match="modelo complete não possui conjunto de teste independente"):
+        ev.compare(banco, completo)
+    with pytest.raises(SystemExit, match="use os bundles spatial/temporal para avaliação"):
+        ev.main(["compare", "--db", banco, "--model", completo])
+
+
 def test_compare_avalia_os_dois_metodos_nas_mesmas_tentativas_de_teste(treinado, tmp_path):
     banco, modelo, bundle = treinado
     r = ev.compare(banco, modelo, cadastro(tmp_path / "cadastro.json"))

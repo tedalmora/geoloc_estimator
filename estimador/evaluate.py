@@ -28,6 +28,7 @@ pontos do treino gravados no bundle, separa pontos conhecidos (generalização t
 novos (extrapolação espacial). Também mede a carga do bundle e a latência do WKNN por leitura
 (média, p95 e máximo), usadas na validação do runtime no Raspberry Pi.
 cell-id: confronta o cadastro com todas as tentativas, com o erro por célula servidora.
+Bundles `complete` (sem conjunto de teste independente) são recusados em `compare`.
 """
 import argparse
 import csv
@@ -44,6 +45,7 @@ from software_version import software_version
 from .dataset import (
     GROUP_COLUMN,
     MIN_GNSS_FOR_MEDIAN,
+    PROTOCOL_COMPLETE,
     PROTOCOL_TEMPORAL,
     Attempt,
     DatasetError,
@@ -185,6 +187,9 @@ def compare(db_path: str, model_path: str, registry_path: Optional[str] = None) 
     model = load_bundle(model_path)
     load_s = time.perf_counter() - start
     bundle = model.bundle
+    if bundle.get("protocol") == PROTOCOL_COMPLETE:
+        raise EvaluationError("modelo complete não possui conjunto de teste independente; use os bundles "
+                              "spatial/temporal para avaliação.")
     policy, info = bundle["reference_policy"], bundle["dataset"]
     if (not isinstance(policy, dict) or not isinstance(policy.get("allow_single_gnss"), bool)
             or not isinstance(info, dict) or not isinstance(info.get("test_measurement_ids"), list)

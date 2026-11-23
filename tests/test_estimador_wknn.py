@@ -307,6 +307,47 @@ def test_cli_de_treino_gera_bundle_e_relatorio(radiomapa, tmp_path, capsys):
         tr.main(["--db", radiomapa, "--technology", "LTE", "--protocol", "spatial", "--out", str(saida)])
 
 
+def test_protocolo_complete_usa_todas_as_amostras_elegiveis_sem_teste(radiomapa, tmp_path):
+    saida = str(tmp_path / "completo.json")
+    bundle, relatorio = tr.train(radiomapa, "LTE", "complete", saida, grid=tr.Grid(k=(1, 3)))
+    elegiveis, _ = tr.eligible_samples(load_dataset(radiomapa).samples, "temporal", POLITICA)
+    assert bundle["fingerprints"]["measurement_id"] == sorted(s.measurement_id for s in elegiveis)
+    assert (bundle["protocol"], bundle["evaluation_available"], bundle["hyperparameter_source"]) == (
+        "complete", False, "grouped_cv_all_eligible")
+    assert bundle["training_groups"]["n_samples"] == len(elegiveis) == bundle["dataset"]["n_eligible_samples"]
+    assert bundle["dataset"]["training_samples_sha256"] == tr.samples_sha256(elegiveis)
+    assert not {"test_measurement_ids", "test_samples_sha256"} & set(bundle["dataset"])
+    assert "test_metrics" not in bundle["validation"] and "split" not in bundle["validation"]
+    texto = json.dumps(relatorio)
+    assert "test_metrics" not in texto and "mean_m" not in texto and "rmse_m" not in texto and "ranking" not in texto
+    assert "fingerprints" not in relatorio
+
+
+def test_bundle_complete_continua_carregavel_e_estima_como_os_demais(radiomapa, tmp_path):
+    saida = str(tmp_path / "completo.json")
+    bundle, _ = tr.train(radiomapa, "LTE", "complete", saida, grid=tr.Grid(k=(1, 3)))
+    modelo = load_bundle(saida)
+    amostra = load_dataset(radiomapa).samples[0]
+    estimativa = modelo.predict(amostra.cells)
+    assert estimativa.valid and modelo.bundle["n_neighbors"] == bundle["n_neighbors"]
+    chosen = bundle["validation"]["hyperparameter_selection"]["chosen"]
+    assert (chosen["k"], chosen["metric"]) == (bundle["n_neighbors"], bundle["distance_metric"])
+
+
+def test_cli_complete_e_grupos_insuficientes(radiomapa, tmp_path, capsys):
+    saida, relatorio = tmp_path / "c.json", tmp_path / "c_relatorio.json"
+    tr.main(["--db", radiomapa, "--technology", "LTE", "--protocol", "complete", "--out", str(saida),
+             "--report", str(relatorio), "--k", "1,3"])
+    texto = capsys.readouterr().out
+    assert "sem teste independente" in texto and "grouped_cv_all_eligible" in texto and "Teste (" not in texto
+    assert json.loads(relatorio.read_text(encoding="utf-8"))["evaluation_available"] is False
+    pequeno = tmp_path / "pequeno.db"
+    criar_radiomapa(pequeno, dias=1, pontos={"P1": (-60, -60, True), "P2": (60, 60, True)}, extras=False)
+    with pytest.raises(DatasetError, match="insufficient_groups"):
+        tr.train(str(pequeno), "LTE", "complete", str(tmp_path / "x.json"))
+    assert not (tmp_path / "x.json").exists()
+
+
 # --------------------------------------------------------------------------- validação do bundle
 @pytest.mark.parametrize("alteracao, mensagem", [
     (lambda b: b.update(model_version=1), "model_version"),
