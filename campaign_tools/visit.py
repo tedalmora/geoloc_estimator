@@ -31,6 +31,9 @@ FIX_FIELDS = (
     "attempt", "capture_utc", "valid", "reason", "lat", "lon", "alt_m", "fix_type",
     "hdop", "nsat", "gnss_utc", "distance_to_mean_m",
 )
+# Serialization precision of the canonical CSV: 10 decimals for coordinates, 3 for uncertainty.
+CANONICAL_COORD_ABS_TOL = 5e-11 + 1e-12
+CANONICAL_UNCERTAINTY_ABS_TOL = 5e-4 + 1e-9
 
 
 class InsufficientFixesError(RuntimeError):
@@ -112,17 +115,43 @@ def _max_session_id(db_path):
         conn.close()
 
 
+def _visit_notes(system, point, session):
+    return f"campaign_tools:{system}:{point}:{session}"
+
+
+def _session_exists(db_path, notes):
+    path = Path(db_path)
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    conn = coletor_db.open_read_only(str(path))
+    try:
+        version, tables = coletor_db.schema_info(conn)
+        if version != coletor_db.SCHEMA_VERSION or "sessions" not in tables:
+            raise ValueError(f"{path}: schema incompatível ao verificar sessões")
+        return conn.execute("SELECT 1 FROM sessions WHERE notes=? LIMIT 1", (notes,)).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def _is_stored(existing):
+    return existing is not None and (existing["lat"] is not None or existing["lon"] is not None)
+
+
+def _check_stored_reference(existing, point, reference):
+    if (existing["lat"] is None or existing["lon"] is None or existing["uncertainty_m"] is None or
+            not math.isclose(existing["lat"], reference["lat"], rel_tol=0, abs_tol=CANONICAL_COORD_ABS_TOL) or
+            not math.isclose(existing["lon"], reference["lon"], rel_tol=0, abs_tol=CANONICAL_COORD_ABS_TOL) or
+            not math.isclose(existing["uncertainty_m"], reference["uncertainty_m"],
+                             rel_tol=0, abs_tol=CANONICAL_UNCERTAINTY_ABS_TOL)):
+        raise ValueError(
+            f"{point}: coordenada/incerteza do banco diverge da referência canônica; não será substituída"
+        )
+
+
 def _register_reference(db_path, point, reference, description):
     existing = _read_point(db_path, point)
-    if existing is not None and (existing["lat"] is not None or existing["lon"] is not None):
-        if (existing["lat"] is None or existing["lon"] is None or
-                not math.isclose(existing["lat"], reference["lat"], abs_tol=1e-9) or
-                not math.isclose(existing["lon"], reference["lon"], abs_tol=1e-9) or
-                existing["uncertainty_m"] is None or
-                not math.isclose(existing["uncertainty_m"], reference["uncertainty_m"], abs_tol=1e-6)):
-            raise ValueError(
-                f"{point}: coordenada/incerteza do banco diverge da referência canônica; não será substituída"
-            )
+    if _is_stored(existing):
+        _check_stored_reference(existing, point, reference)
         return existing["id"]
     command = [
         sys.executable, "-m", "coletor.daemon", "point-add", "--db", str(db_path),
@@ -139,7 +168,7 @@ def _register_reference(db_path, point, reference, description):
     return registered["id"]
 
 
-def _check_summary_target(path, system, point, session):
+def _check_summary_target(path, system, point, session, replaceable=False):
     target = Path(path)
     if not target.exists():
         return
@@ -147,9 +176,27 @@ def _check_summary_target(path, system, point, session):
         reader = csv.DictReader(stream)
         if reader.fieldnames != list(SUMMARY_FIELDS):
             raise ValueError(f"{target}: cabeçalho de resumo incompatível")
-        if any(row["system"] == system and row["point"] == point and row["session"] == session
-               for row in reader):
+        if not replaceable and any(row["system"] == system and row["point"] == point and
+                                   row["session"] == session for row in reader):
             raise FileExistsError(f"{target}: visita {system}/{point}/{session} já registrada")
+
+
+def _discard_orphan_attempt(results_dir, system, point, session):
+    """Drop only this visit's fixes file and summary row; callers prove no session or log exists."""
+    (results_dir / "referencias" / f"{point}_{session}_fixes.csv").unlink(missing_ok=True)
+    summary_path = results_dir / "resumo_referencia.csv"
+    if not summary_path.exists():
+        return
+    with summary_path.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    kept = [row for row in rows
+            if not (row["system"] == system and row["point"] == point and row["session"] == session)]
+    if len(kept) == len(rows):
+        return
+    with summary_path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=SUMMARY_FIELDS)
+        writer.writeheader()
+        writer.writerows(kept)
 
 
 def _write_visit_results(results_dir, system, point, session, attempts, fixes, summary, comparison, phone):
@@ -277,11 +324,15 @@ def run_visit(args, input_fn=input, sleep=time.sleep):
     results_dir = Path(args.results)
     results_dir.mkdir(parents=True, exist_ok=True)
     canonical_path = Path(args.canonical) if args.canonical else results_dir / "referencias_canonicas.csv"
-    fix_path = results_dir / "referencias" / f"{args.point}_{args.session}_fixes.csv"
     log_path = results_dir / "logs" / f"{args.point}_{args.session}.log"
-    if fix_path.exists() or log_path.exists():
+    notes = _visit_notes(args.system, args.point, args.session)
+    if _session_exists(args.db, notes):
+        raise FileExistsError(f"{args.point}/{args.session}: sessão já existe no banco; visita não pode ser repetida")
+    if log_path.exists():
         raise FileExistsError("já há evidência para esta visita; use outro diretório de resultados")
-    _check_summary_target(results_dir / "resumo_referencia.csv", args.system, args.point, args.session)
+    # Without a session or log, earlier fixes/summary row are an interrupted attempt and are replaced.
+    _check_summary_target(results_dir / "resumo_referencia.csv", args.system, args.point, args.session,
+                          replaceable=True)
 
     is_primary_reference = args.system == "raspberrypi_os" and args.session == "S1"
     if is_primary_reference:
@@ -292,10 +343,13 @@ def run_visit(args, input_fn=input, sleep=time.sleep):
         canonical = read_canonical(canonical_path).get(args.point)
         if canonical is None:
             raise ValueError(f"{args.point}: ausente em {canonical_path}; execute Raspberry Pi OS S1 primeiro")
+        stored = _read_point(args.db, args.point)
+        if _is_stored(stored):
+            _check_stored_reference(stored, args.point, canonical)
 
     if args.system == "raspberrypi_os" and args.session == "S1":
         existing = _read_point(args.db, args.point)
-        if existing is not None and (existing["lat"] is not None or existing["lon"] is not None):
+        if _is_stored(existing):
             raise ValueError(f"{args.point}: o banco já contém coordenada; não será substituída")
 
     print(f"Imobilize o equipamento em {args.point}; iniciando estabilização de 60 s.")
@@ -303,6 +357,7 @@ def run_visit(args, input_fn=input, sleep=time.sleep):
     try:
         fixes, attempts = collect_valid_fixes(args.port)
     except InsufficientFixesError as exc:
+        _discard_orphan_attempt(results_dir, args.system, args.point, args.session)
         _write_failed_attempts(results_dir, args.point, args.session, exc.records)
         raise
     summary = summarize_fixes(fixes)
@@ -313,6 +368,7 @@ def run_visit(args, input_fn=input, sleep=time.sleep):
             f"ALERTA: {comparison['distance_m']:.2f} m da referência, "
             f"limite de revisão {comparison['threshold_m']:.2f} m; avaliação manual obrigatória."
         )
+    _discard_orphan_attempt(results_dir, args.system, args.point, args.session)
     saved_fixes, saved_summary = _write_visit_results(
         results_dir, args.system, args.point, args.session, attempts, fixes, summary, comparison, phone,
     )
@@ -337,7 +393,7 @@ def run_visit(args, input_fn=input, sleep=time.sleep):
         sys.executable, "-m", "coletor.daemon", "continuous", "--port", args.port,
         "--db", args.db, "--scenario", "estatico", "--environment", getattr(args, "environment", "outdoor"),
         "--reference-point", args.point, "--campaign-plmn", args.plmn,
-        "--notes", f"campaign_tools:{args.system}:{args.point}:{args.session}",
+        "--notes", notes,
         "--interval", str(args.interval_s), "--max-measurements", "3",
     ]
     data_dir = args.data_dir or str(Path(args.db).parent)

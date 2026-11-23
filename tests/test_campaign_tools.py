@@ -951,3 +951,137 @@ def test_separation_old_cli_still_requires_canonical_and_out():
     with pytest.raises(SystemExit) as exc:
         reference._main(["separation", "--canonical", "refs.csv"])
     assert exc.value.code == 2
+
+
+REAL_P01 = {"lat": -26.8790459566667, "lon": -49.11330076, "uncertainty_m": 0.047814995826053}
+REAL_P01_CSV = {"lat": "-26.8790459567", "lon": "-49.1133007600", "uncertainty_m": "0.048"}
+
+
+def _s2_visit(tmp_path, monkeypatch, canonical=None, stored=REAL_P01):
+    results = tmp_path / "results"
+    results.mkdir()
+    values = REAL_P01_CSV if canonical is None else canonical
+    with (results / "referencias_canonicas.csv").open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=reference.CANONICAL_FIELDS)
+        writer.writeheader()
+        writer.writerow({"point": "P01", **values})
+    db_path = tmp_path / "db.sqlite"
+    conn = db.connect(str(db_path))
+    point_id = db.add_reference_point(
+        conn, "P01", stored["lat"], stored["lon"], coord_source="gnss_media_s1",
+        coord_uncertainty_m=stored["uncertainty_m"],
+    )
+    conn.close()
+    fixes = [{**fix, "lat": float(values["lat"]) + i * 1e-8, "lon": float(values["lon"])}
+             for i, fix in enumerate(_fixes())]
+    attempts = [{**fix, "valid": True, "reason": ""} for fix in fixes]
+    monkeypatch.setattr(visit, "collect_valid_fixes", lambda port: (fixes, attempts))
+    monkeypatch.setattr(visit.monitor, "run_collection", lambda *args: 0)
+    used = []
+    monkeypatch.setattr(visit, "_verify_collection", lambda _db, _prev, pid: used.append(pid) or (88, 3))
+    args = SimpleNamespace(
+        system="raspberrypi_os", point="P01", session="S2", db=str(db_path), port="/dev/ttyUSB2",
+        plmn="72406", results=str(results), canonical=None, data_dir=None, interval_s=90,
+        environment="indoor",
+    )
+    return args, results, db_path, point_id, used
+
+
+def _stored_points(db_path):
+    conn = sqlite3.connect(str(db_path))
+    try:
+        return conn.execute("SELECT * FROM reference_points").fetchall()
+    finally:
+        conn.close()
+
+
+def test_s2_reuses_point_accepting_csv_rounding_without_changing_database(tmp_path, monkeypatch):
+    args, results, db_path, point_id, used = _s2_visit(tmp_path, monkeypatch)
+    canonical = reference.read_canonical(results / "referencias_canonicas.csv")["P01"]
+    assert canonical["uncertainty_m"] == 0.048 and canonical["lat"] == pytest.approx(REAL_P01["lat"], abs=1e-10)
+    before = _stored_points(db_path)
+    assert visit.run_visit(args, input_fn=lambda _: "OK", sleep=lambda _: None) == 88
+    assert used == [point_id]
+    assert _stored_points(db_path) == before
+    assert (results / "referencias" / "P01_S2_fixes.csv").exists()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("lat", REAL_P01["lat"] + 1e-7), ("lon", REAL_P01["lon"] - 1e-7),
+    ("uncertainty_m", 0.049), ("uncertainty_m", 0.047),
+])
+def test_register_reference_rejects_real_divergence_but_accepts_csv_rounding(tmp_path, monkeypatch, field, value):
+    args, results, db_path, point_id, _ = _s2_visit(tmp_path, monkeypatch)
+    canonical = reference.read_canonical(results / "referencias_canonicas.csv")["P01"]
+    assert visit._register_reference(db_path, "P01", canonical, "x") == point_id
+    with pytest.raises(ValueError, match="diverge"):
+        visit._register_reference(db_path, "P01", {**canonical, field: value}, "x")
+
+
+def test_s2_with_divergent_database_fails_before_writing_artifacts(tmp_path, monkeypatch):
+    args, results, db_path, _, _ = _s2_visit(
+        tmp_path, monkeypatch, stored={**REAL_P01, "uncertainty_m": 0.5},
+    )
+    monkeypatch.setattr(visit, "collect_valid_fixes", lambda port: pytest.fail("não deve coletar fixes"))
+    with pytest.raises(ValueError, match="diverge"):
+        visit.run_visit(args, input_fn=lambda _: "OK", sleep=lambda _: None)
+    assert not (results / "referencias").exists() and not (results / "resumo_referencia.csv").exists()
+
+
+def test_s2_outside_tolerance_alerts_and_needs_manual_confirmation(tmp_path, monkeypatch, capsys):
+    far = {**REAL_P01_CSV, "lat": "-26.8780459567"}
+    args, results, db_path, _, used = _s2_visit(tmp_path, monkeypatch, canonical=far,
+                                                stored={**REAL_P01, "lat": -26.8780459567})
+    monkeypatch.setattr(visit, "collect_valid_fixes", lambda port: (
+        [{**f, "lat": -26.8790459567 + i * 1e-8} for i, f in enumerate(_fixes())],
+        [{**f, "lat": -26.8790459567 + i * 1e-8, "valid": True, "reason": ""} for i, f in enumerate(_fixes())],
+    ))
+    before = _stored_points(db_path)
+    with pytest.raises(RuntimeError, match="visita cancelada"):
+        visit.run_visit(args, input_fn=lambda _: "NAO", sleep=lambda _: None)
+    assert "ALERTA" in capsys.readouterr().out and used == []
+    assert _stored_points(db_path) == before
+
+
+def _orphan_summary(results, *visits):
+    rows = [{"system": "raspberrypi_os", "point": "P01", "session": session, "attempts": "5"} for session in visits]
+    with (results / "resumo_referencia.csv").open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=visit.SUMMARY_FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    (results / "referencias").mkdir(exist_ok=True)
+    for session in visits:
+        (results / "referencias" / f"P01_{session}_fixes.csv").write_text(f"old {session}\n", encoding="utf-8")
+
+
+def test_s2_repeats_orphan_attempt_replacing_only_its_artifacts(tmp_path, monkeypatch):
+    args, results, db_path, _, _ = _s2_visit(tmp_path, monkeypatch)
+    _orphan_summary(results, "S1", "S2")
+    assert visit.run_visit(args, input_fn=lambda _: "OK", sleep=lambda _: None) == 88
+    with (results / "resumo_referencia.csv").open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    assert [(row["point"], row["session"]) for row in rows] == [("P01", "S1"), ("P01", "S2")]
+    assert rows[0]["attempts"] == "5" and rows[1]["attempts"] == "5" and rows[1]["valid_fixes"] == "5"
+    assert (results / "referencias" / "P01_S1_fixes.csv").read_text(encoding="utf-8") == "old S1\n"
+    assert (results / "referencias" / "P01_S2_fixes.csv").read_text(encoding="utf-8").startswith("attempt,")
+
+
+@pytest.mark.parametrize("existing", ["session", "log"])
+def test_s2_cannot_repeat_existing_visit(tmp_path, monkeypatch, existing):
+    args, results, db_path, point_id, _ = _s2_visit(tmp_path, monkeypatch)
+    _orphan_summary(results, "S2")
+    if existing == "session":
+        conn = db.connect(str(db_path))
+        db.create_session(
+            conn, mode="continuous", scenario="estatico", environment="indoor", modem_id="fn990",
+            metadata={}, reference_point_id=point_id, notes="campaign_tools:raspberrypi_os:P01:S2",
+        )
+        conn.close()
+    else:
+        (results / "logs").mkdir()
+        (results / "logs" / "P01_S2.log").write_text("x\n", encoding="utf-8")
+    monkeypatch.setattr(visit, "collect_valid_fixes", lambda port: pytest.fail("não deve coletar fixes"))
+    with pytest.raises(FileExistsError):
+        visit.run_visit(args, input_fn=lambda _: "OK", sleep=lambda _: None)
+    assert (results / "referencias" / "P01_S2_fixes.csv").read_text(encoding="utf-8") == "old S2\n"
