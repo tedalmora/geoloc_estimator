@@ -4,11 +4,13 @@ import json
 import math
 import os
 import pickle
+import shutil
+import sqlite3
 import statistics
 
 import pytest
 
-from radiomapa_sintetico import CAMPAIGN_PLMN, CELULAS, LOCAL_KEY, criar_radiomapa, observacao
+from radiomapa_sintetico import CAMPAIGN_PLMN, CELULAS, LOCAL_KEY, criar_radiomapa, observacao, rotular_sessoes
 
 import estimador.train as tr
 from estimador.dataset import CsurvCell, DatasetError, load_dataset, make_group_split, samples_in_groups
@@ -305,6 +307,76 @@ def test_cli_de_treino_gera_bundle_e_relatorio(radiomapa, tmp_path, capsys):
     assert json.loads(relatorio.read_text(encoding="utf-8"))["validation"]["grid"]["k"] == [1, 3]
     with pytest.raises(SystemExit, match="já existe"):
         tr.main(["--db", radiomapa, "--technology", "LTE", "--protocol", "spatial", "--out", str(saida)])
+
+
+def test_temporal_rotulado_usa_s1_na_selecao_e_s2_no_teste_ignorando_a_ordem_dos_ids(radiomapa, tmp_path):
+    banco = tmp_path / "rotulado.db"
+    shutil.copy(radiomapa, banco)
+    s2 = set(range(1, 10))  # S2 com os menores session_id: a ordem dos ids não define S1/S2
+    rotular_sessoes(banco, s2)
+    amostras, _ = tr.eligible_samples(load_dataset(str(banco)).samples, "temporal", POLITICA)
+    divisao = make_group_split(amostras, "temporal", test_fraction=0.2)  # test_fraction não participa
+    assert divisao.selection_groups == tuple(range(10, 19)) and divisao.test_groups == tuple(range(1, 10))
+    assert all(set(treino) | set(validacao) <= set(divisao.selection_groups) for treino, validacao in divisao.folds)
+    bundle, _ = tr.train(str(banco), "LTE", "temporal", str(tmp_path / "t.json"), grid=tr.Grid(k=(1, 3)))
+    split = bundle["validation"]["split"]
+    assert (split["selection_groups"], split["test_groups"]) == (list(range(10, 19)), list(range(1, 10)))
+    assert (bundle["temporal_selection"], bundle["temporal_test"]) == ("S1", "S2")
+    assert (split["temporal_selection"], split["temporal_test"]) == ("S1", "S2")
+    sessoes = {s.measurement_id: s.session_id for s in amostras}
+    assert {sessoes[i] for i in bundle["fingerprints"]["measurement_id"]} == set(range(10, 19))
+    assert {sessoes[i] for i in bundle["dataset"]["test_measurement_ids"]} == s2
+
+
+def test_selecao_temporal_nao_usa_nenhuma_medicao_s2(radiomapa, tmp_path, monkeypatch):
+    banco = tmp_path / "rotulado.db"
+    shutil.copy(radiomapa, banco)
+    rotular_sessoes(banco, set(range(10, 19)))
+    original = tr.load_dataset
+    _, antes = tr.train(str(banco), "LTE", "temporal", str(tmp_path / "a.json"))
+
+    def s2_adulterada(*args, **kwargs):
+        ds = original(*args, **kwargs)
+        ds.samples = [dataclasses.replace(s, cells=tuple(dataclasses.replace(c, rsrp_dbm=-60.0) for c in s.cells))
+                      if s.session_label == "S2" else s for s in ds.samples]
+        return ds
+
+    monkeypatch.setattr(tr, "load_dataset", s2_adulterada)
+    _, depois = tr.train(str(banco), "LTE", "temporal", str(tmp_path / "b.json"))
+    assert depois["validation"]["ranking"] == antes["validation"]["ranking"]
+    assert depois["validation"]["chosen"] == antes["validation"]["chosen"]
+    assert depois["validation"]["test_metrics"] != antes["validation"]["test_metrics"]
+
+
+def test_temporal_com_sessao_sem_rotulo_claro_gera_erro(radiomapa, tmp_path):
+    banco = tmp_path / "parcial.db"
+    shutil.copy(radiomapa, banco)
+    rotular_sessoes(banco, set(range(10, 19)))
+    conn = sqlite3.connect(str(banco))
+    conn.execute("UPDATE sessions SET notes = 'campanha antiga' WHERE session_id = 4")
+    conn.commit()
+    conn.close()
+    with pytest.raises(DatasetError, match=r"temporal_validation_unavailable.*\[4\].*sem rótulo S1/S2"):
+        tr.train(str(banco), "LTE", "temporal", str(tmp_path / "x.json"))
+    assert not (tmp_path / "x.json").exists()
+
+
+def test_spatial_e_complete_nao_mudam_com_rotulos(radiomapa, tmp_path):
+    banco = tmp_path / "rotulado.db"
+    shutil.copy(radiomapa, banco)
+    rotular_sessoes(banco, set(range(10, 19)))
+    grade = tr.Grid(k=(1, 3))
+    spatial_a, _ = tr.train(radiomapa, "LTE", "spatial", str(tmp_path / "sa.json"), grid=grade)
+    spatial_b, _ = tr.train(str(banco), "LTE", "spatial", str(tmp_path / "sb.json"), grid=grade)
+    assert spatial_a["validation"]["split"] == spatial_b["validation"]["split"]
+    assert spatial_a["dataset"]["test_samples_sha256"] == spatial_b["dataset"]["test_samples_sha256"]
+    assert "temporal_selection" not in spatial_b
+    complete_a, _ = tr.train(radiomapa, "LTE", "complete", str(tmp_path / "ca.json"), grid=grade)
+    complete_b, _ = tr.train(str(banco), "LTE", "complete", str(tmp_path / "cb.json"), grid=grade)
+    assert complete_a["fingerprints"] == complete_b["fingerprints"]
+    assert complete_a["validation"]["hyperparameter_selection"]["chosen"] == (
+        complete_b["validation"]["hyperparameter_selection"]["chosen"])
+    assert "temporal_selection" not in complete_b
 
 
 def test_protocolo_complete_usa_todas_as_amostras_elegiveis_sem_teste(radiomapa, tmp_path):

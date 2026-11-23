@@ -2,11 +2,14 @@
 import csv
 import json
 import math
+import shutil
 import sqlite3
 
 import pytest
 
-from radiomapa_sintetico import CAMPAIGN_PLMN, CELULAS, celulas_vistas, criar_radiomapa, inserir_medicao, para_latlon
+from radiomapa_sintetico import (
+    CAMPAIGN_PLMN, CELULAS, celulas_vistas, criar_radiomapa, inserir_medicao, para_latlon, rotular_sessoes,
+)
 
 import coletor.db as cdb
 import estimador.evaluate as ev
@@ -48,6 +51,30 @@ def test_metricas_de_erro():
     assert s["cdf_m"] == [1.0, 2.0, 3.0, 4.0]
     vazio = ev.error_summary([], n_total=3)
     assert (vazio["coverage"], vazio["mean_m"], vazio["cdf_m"]) == (0.0, None, [])
+
+
+def test_compare_valida_o_split_temporal_s1_s2(treinado, tmp_path):
+    banco, _, _ = treinado
+    rotulado = str(tmp_path / "rotulado.db")
+    shutil.copy(banco, rotulado)
+    rotular_sessoes(rotulado, set(range(10, 19)))
+    modelo = str(tmp_path / "wknn_lte_temporal.json")
+    bundle, _ = tr.train(rotulado, "LTE", "temporal", modelo, grid=GRADE)
+    r = ev.compare(rotulado, modelo)
+    s2 = list(range(10, 19))
+    assert (r["protocol"], r["group_column"], r["test_groups"]) == ("temporal", "session_id", s2)
+    assert r["n_test_samples"] == r["n_attempts"] == 27  # 9 sessões S2 × 3 tentativas, todas elegíveis
+    assert {p["session_id"] for p in r["predictions"]} == set(s2) and {p["group_id"] for p in r["predictions"]} == set(s2)
+    assert not set(bundle["fingerprints"]["measurement_id"]) & set(bundle["dataset"]["test_measurement_ids"])
+    banco_alterado = str(tmp_path / "alterado.db")
+    shutil.copy(rotulado, banco_alterado)
+    conn = sqlite3.connect(banco_alterado)
+    conn.execute("UPDATE observed_cells SET rsrp_dbm = -61 WHERE measurement_id IN "
+                 "(SELECT measurement_id FROM measurements WHERE session_id = 10)")
+    conn.commit()
+    conn.close()
+    with pytest.raises(ev.EvaluationError, match="test_samples_changed"):
+        ev.compare(banco_alterado, modelo)
 
 
 def test_compare_recusa_bundle_complete_sem_teste_independente(treinado, tmp_path):

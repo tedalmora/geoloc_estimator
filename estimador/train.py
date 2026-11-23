@@ -332,6 +332,8 @@ def train(db_path: str, technology: str, protocol: str, out_path: str, campaign_
 
     bundle = build_bundle(selection, policy, best, protocol)
     bundle["software_version"] = software_version()
+    if split.temporal_labels:
+        bundle["temporal_selection"], bundle["temporal_test"] = "S1", "S2"
     bundle["reference_policy"] = dataset.reference_policy()
     known_points = sorted({s.reference_point_id for s in selection if s.reference_point_id is not None})
     bundle["training_groups"] = {"protocol": protocol, "group_column": GROUP_COLUMN[protocol],

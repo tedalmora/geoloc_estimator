@@ -136,6 +136,16 @@ def _extras(conn, ids):
                     snapshot_status="partial")
 
 
+def rotular_sessoes(caminho, s2_ids, ate=18):
+    """Grava nas notes das sessões 1..`ate` o rótulo S1/S2 do campaign_tools (S2 = `s2_ids`)."""
+    conn = cdb.connect(str(caminho))
+    with conn:
+        for sid in range(1, ate + 1):
+            conn.execute("UPDATE sessions SET notes = ? WHERE session_id = ?",
+                         (f"campaign_tools:raspberrypi_os:P{sid:02d}:{'S2' if sid in s2_ids else 'S1'}", sid))
+    conn.close()
+
+
 def info_json(caminho):
     """Conteúdo do banco em JSON (para comparar antes/depois sem depender do arquivo)."""
     conn = cdb.open_read_only(str(caminho))

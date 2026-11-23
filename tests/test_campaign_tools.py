@@ -1154,6 +1154,10 @@ def test_wknn_complete_summary_has_only_training_facts(tmp_path, monkeypatch, ca
     assert not {"mean_m", "rmse_m", "p90_m", "p95_m", "coverage"} & set(summary)
     assert "dataset" in bundle and "test_samples_sha256" not in bundle["dataset"]
     assert (bundle["protocol"], bundle["evaluation_available"]) == ("complete", False)
+    temporal = json.loads((results / "avaliacoes" / "temporal" / "avaliacao.json").read_text(encoding="utf-8"))
+    split = json.loads((results / "modelos" / "wknn_lte_temporal.json").read_text(encoding="utf-8"))["validation"]["split"]
+    assert temporal["test_groups"] == split["test_groups"] == [2, 4, 6, 8]  # S2 de cada ponto
+    assert split["selection_groups"] == [1, 3, 5, 7] and temporal["n_attempts"] == 12
     assert (results / "avaliacoes" / "spatial" / "avaliacao.json").read_text(encoding="utf-8")
 
 

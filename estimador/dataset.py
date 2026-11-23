@@ -21,6 +21,7 @@
 import hashlib
 import json
 import random
+import re
 import statistics
 from collections import Counter
 from dataclasses import dataclass, field
@@ -101,6 +102,7 @@ class Sample:
     cells: Tuple[CsurvCell, ...]
     reference: ReferencePosition
     environment: Optional[str] = None
+    session_label: Optional[str] = None  # S1 ou S2, de sessions.notes (campaign_tools:<sistema>:<ponto>:<S1|S2>)
 
     def group(self, protocol: str) -> Optional[int]:
         return self.reference_point_id if protocol == PROTOCOL_SPATIAL else self.session_id
@@ -154,6 +156,16 @@ class Dataset:
                 "allow_single_gnss": self.allow_single_gnss, "min_gnss_for_median": self.min_gnss_for_median}
 
 
+_SESSION_LABEL = re.compile(r"campaign_tools:[^:]+:[^:]+:(S1|S2)")
+SESSION_SELECTION, SESSION_TEST = "S1", "S2"
+
+
+def session_label(notes: Optional[str]) -> Optional[str]:
+    """S1 ou S2 a partir das notes gravadas pelo campaign_tools.visit; None se não houver rótulo claro."""
+    match = _SESSION_LABEL.fullmatch((notes or "").strip())
+    return match.group(1) if match else None
+
+
 def samples_sha256(samples: Sequence[Sample]) -> str:
     """Identificação do conteúdo usado (medições, referências e células), independente da ordem."""
     payload = [
@@ -202,6 +214,8 @@ def load_dataset(db_path: str, allow_single_gnss: bool = False, min_gnss_for_med
         points = conn.execute(
             "SELECT reference_point_id, lat, lon, coord_source, coord_uncertainty_m FROM reference_points"
         ).fetchall()
+        session_labels = {sid: session_label(notes) for sid, notes in
+                          conn.execute("SELECT session_id, notes FROM sessions")}
     finally:
         conn.close()
 
@@ -255,7 +269,7 @@ def load_dataset(db_path: str, allow_single_gnss: bool = False, min_gnss_for_med
             excluded[exclusion] += 1
             continue
         samples.append(Sample(mid, sid, pid, started_at, session_started_at, access_mode, campaign_plmn, global_key,
-                              cells, reference, environment))
+                              cells, reference, environment, session_labels.get(sid)))
     return Dataset(db_path, samples, dict(excluded), allow_single_gnss, min_gnss_for_median, attempts)
 
 
@@ -279,14 +293,40 @@ class GroupSplit:
     selection_groups: Tuple[int, ...]
     folds: Tuple[Tuple[Tuple[int, ...], Tuple[int, ...]], ...]  # (grupos de treino, grupos de validação)
     ungrouped_samples: int  # amostras sem grupo neste protocolo (ex.: rotas no protocolo spatial)
+    temporal_labels: bool = False  # temporal por rótulos S1 (seleção) e S2 (teste), não por horário
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "protocol": self.protocol, "group_column": GROUP_COLUMN[self.protocol],
             "test_groups": list(self.test_groups), "selection_groups": list(self.selection_groups),
             "folds": [{"train_groups": list(t), "validation_groups": list(v)} for t, v in self.folds],
             "ungrouped_samples": self.ungrouped_samples,
         }
+        if self.temporal_labels:
+            data.update(temporal_selection=SESSION_SELECTION, temporal_test=SESSION_TEST)
+        return data
+
+
+def _labelled_temporal_split(samples, sizes, groups, n_folds, ungrouped) -> GroupSplit:
+    """Temporal da campanha: todas as sessões S1 na seleção e todas as S2 no teste, pelas notes das sessões."""
+    labels = {s.session_id: s.session_label for s in samples}
+    unlabelled = [g for g in groups if labels[g] is None]
+    if unlabelled:
+        raise DatasetError(
+            "temporal_validation_unavailable",
+            f"sessão(ões) {unlabelled} sem rótulo S1/S2 em sessions.notes (campaign_tools:<sistema>:<ponto>:S1|S2); "
+            "o protocolo temporal não infere S1/S2 pela ordem dos session_id nem pelo horário.",
+        )
+    selection = [g for g in groups if labels[g] == SESSION_SELECTION]
+    test = [g for g in groups if labels[g] == SESSION_TEST]
+    if not test or len(selection) < MIN_SELECTION_GROUPS:
+        raise DatasetError(
+            "temporal_validation_unavailable",
+            f"insufficient_groups: {len(selection)} sessão(ões) S1 e {len(test)} S2 com amostras elegíveis; mínimo "
+            f"{MIN_SELECTION_GROUPS} S1 (seleção, com ao menos 2 grupos de treino em cada fold) e 1 S2 (teste).",
+        )
+    return GroupSplit(PROTOCOL_TEMPORAL, tuple(test), tuple(selection), _make_folds(PROTOCOL_TEMPORAL, selection, sizes, n_folds),
+                      ungrouped, temporal_labels=True)
 
 
 def make_group_split(
@@ -294,8 +334,10 @@ def make_group_split(
 ) -> GroupSplit:
     """Reserva grupos inteiros para o teste final e divide os demais em folds de seleção.
 
-    spatial: grupos de teste sorteados com `seed`. temporal: as sessões mais recentes ficam no
-    teste. Os folds distribuem os grupos de seleção equilibrando o número de amostras. Fold com
+    spatial: grupos de teste sorteados com `seed`. temporal: se as sessões têm rótulo S1/S2 nas notes
+    (campaign_tools), S1 inteira é seleção e S2 inteira é teste (sem usar horário, ordem dos
+    session_id nem `test_fraction`; sessão sem rótulo é erro); sem nenhum rótulo (banco antigo),
+    as sessões mais recentes ficam no teste. Os folds distribuem os grupos de seleção equilibrando o número de amostras. Fold com
     menos de 2 grupos de treino encerra com insufficient_groups (sem seleção com 1 grupo).
     """
     if protocol not in PROTOCOLS:
@@ -305,6 +347,8 @@ def make_group_split(
     sizes = Counter(s.group(protocol) for s in samples if s.group(protocol) is not None)
     ungrouped = sum(1 for s in samples if s.group(protocol) is None)
     groups = sorted(sizes)
+    if protocol == PROTOCOL_TEMPORAL and any(s.session_label for s in samples):
+        return _labelled_temporal_split(samples, sizes, groups, n_folds, ungrouped)
     if len(groups) < MIN_GROUPS:
         raise DatasetError(
             f"{protocol}_validation_unavailable",
