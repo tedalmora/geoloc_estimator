@@ -11,6 +11,7 @@ import contextlib
 import hashlib
 import io
 import json
+import math
 import os
 import shutil
 import sys
@@ -25,6 +26,7 @@ from estimador.dataset import (
 )
 from estimador.features import TECHNOLOGIES, CellFilterPolicy
 from estimador.methods.fingerprint import BundleError, load_bundle
+from runtime import daemon as runtime_daemon
 
 from . import check, config, prepare
 
@@ -32,7 +34,7 @@ MODEL_PROTOCOLS = (PROTOCOL_SPATIAL, PROTOCOL_TEMPORAL, PROTOCOL_COMPLETE)
 DEPLOY_DIR = "deployed"
 
 
-def _load(campaign, config_path):
+def load_context(campaign, config_path):
     path = config.find_config(config_path)
     location = {} if path is None else config.load_config(path)
     collection = prepare.load_collection(prepare.resolve_collection(campaign, location.get("data_dir")))
@@ -126,7 +128,7 @@ def _metrics_line(summary):
 
 
 def run_train(args):
-    collection, location = _load(args.campaign, args.config)
+    collection, location = load_context(args.campaign, args.config)
     name, results, db_path = collection["name"], Path(collection["results"]), collection["db"]
     technology = args.technology
     report = check.check_collection(collection)
@@ -205,8 +207,51 @@ def _prepare_atomic(target, data):
     return tmp
 
 
+def _runtime_target(args, location):
+    if args.runtime_config:
+        return Path(args.runtime_config).expanduser()
+    return config.find_runtime_config() or config.default_runtime_config(location.get("system"))
+
+
+def plan_runtime_config(target, location, deployed_bundle):
+    """New runtime.conf text and the (key, old, new) changes; nothing is written. Always manual mode."""
+    missing = [key for key in ("system", "data_dir", "port", "interval_s") if not location.get(key)]
+    if missing:
+        raise ValueError(f"tcc-location.conf ausente ou sem {', '.join(missing)}; use --no-runtime-config")
+    managed = {
+        "TCC_METHOD": "wknn", "TCC_PORT": location["port"],
+        "TCC_INTERVAL": str(math.ceil(float(location["interval_s"]))), "TCC_MODEL": str(deployed_bundle),
+    }
+    if not target.exists():
+        runtime_dir = Path(location["data_dir"]) / "runtime"
+        log = "/var/log/tcc/runtime.log" if location["system"] == "buildroot" else str(runtime_dir / "runtime.log")
+        values = {
+            "TCC_MODE": "manual", **managed, "TCC_REGISTRY": "",
+            "TCC_OUTPUT": str(runtime_dir / "latest_position.json"),
+            "TCC_HISTORY": str(runtime_dir / "history.jsonl"), "TCC_LOG": log,
+        }
+        text = "# Gerado por campaign_tools.wknn deploy; TCC_MODE=manual: o runtime nao inicia sozinho.\n"
+        text += "".join(f"{key}={value}\n" for key, value in values.items())
+        return text, [(key, None, value) for key, value in managed.items()]
+    try:
+        current = runtime_daemon.load_config(str(target))
+    except runtime_daemon.RuntimeConfigError as exc:
+        raise ValueError(f"{target}: runtime.conf incompativel ({exc}); corrija-o ou use --no-runtime-config") from exc
+    if current.mode != "manual":
+        raise ValueError(f"{target}: TCC_MODE={current.mode}; o deploy so prepara runtime.conf em modo manual "
+                         "(ajuste manualmente ou use --no-runtime-config)")
+    old = {"TCC_METHOD": current.method, "TCC_PORT": current.port, "TCC_INTERVAL": current.interval,
+           "TCC_MODEL": current.model}
+    lines = []
+    for line in target.read_text(encoding="utf-8").splitlines():
+        key = line.partition("=")[0].strip()
+        lines.append(f"{key}={managed[key]}" if key in managed and not line.lstrip().startswith("#") else line)
+    changes = [(key, old[key], value) for key, value in managed.items() if old[key] != value]
+    return "\n".join(lines) + "\n", changes
+
+
 def run_deploy(args):
-    collection, _ = _load(args.campaign, args.config)
+    collection, location = load_context(args.campaign, args.config)
     results = Path(collection["results"])
     technology = args.technology
     source = artifact_paths(results, technology, args.model)["model"]
@@ -219,9 +264,13 @@ def run_deploy(args):
     data = source.read_bytes()
     info = bundle["dataset"]
     target_dir = results / "modelos" / DEPLOY_DIR
-    target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / f"wknn_{technology.lower()}.json"
     metadata_path = target_dir / "deployment.json"
+    runtime_target = runtime_text = changes = None
+    if not args.no_runtime_config:
+        runtime_target = _runtime_target(args, location)
+        runtime_text, changes = plan_runtime_config(runtime_target, location, target)
+    target_dir.mkdir(parents=True, exist_ok=True)
     metadata = {
         "campaign": collection["name"], "technology": technology, "selected_model": args.model,
         "source_bundle": str(source), "source_bundle_sha256": hashlib.sha256(data).hexdigest(),
@@ -233,15 +282,32 @@ def run_deploy(args):
     try:
         temporary.append(_prepare_atomic(target, data))
         temporary.append(_prepare_atomic(metadata_path, json.dumps(metadata, indent=2).encode("utf-8")))
+        if runtime_target is not None:
+            runtime_target.parent.mkdir(parents=True, exist_ok=True)
+            temporary.append(_prepare_atomic(runtime_target, runtime_text.encode("utf-8")))
         os.replace(temporary[0], target)
         os.replace(temporary[1], metadata_path)
+        if runtime_target is not None:
+            if runtime_target.exists() and changes:
+                shutil.copy2(runtime_target, runtime_target.with_name(runtime_target.name + ".bak"))
+            os.replace(temporary[2], runtime_target)
     finally:
         for tmp in temporary:
             tmp.unlink(missing_ok=True)
     print(f"Modelo implantado: {args.model} ({technology})")
     print(f"Origem: {source}\nDestino: {target}\nRegistro: {metadata_path}")
     if not metadata["evaluation_available"]:
-        print("O modelo complete nao possui avaliacao independente. runtime.conf nao foi alterado.")
+        print("O modelo complete nao possui avaliacao independente.")
+    if runtime_target is None:
+        print("runtime.conf nao alterado (--no-runtime-config)")
+        return target
+    print(f"runtime.conf preparado: {runtime_target}\nModo: manual")
+    for key, before, after in changes:
+        print(f"  {key}: {'(novo)' if before is None else before or '(vazio)'} -> {after}")
+    if not changes:
+        print("  ja estava atualizado")
+    option = f" --runtime-config {runtime_target}" if args.runtime_config else ""
+    print(f"Inferencia pontual (nao inicia o daemon):\n  python -m campaign_tools.position{option}")
     return target
 
 
@@ -258,6 +324,10 @@ def _main(argv=None):
                               help="substitui modelos, relatorios e avaliacoes WKNN ja gerados")
     deploy_parser.add_argument("--model", choices=MODEL_PROTOCOLS, default=PROTOCOL_COMPLETE,
                                help="modelo a implantar (padrao: complete)")
+    runtime_group = deploy_parser.add_mutually_exclusive_group()
+    runtime_group.add_argument("--runtime-config", help="runtime.conf a preparar (padrao: o existente ou o do sistema)")
+    runtime_group.add_argument("--no-runtime-config", action="store_true",
+                               help="implanta o bundle sem preparar runtime.conf")
     args = parser.parse_args(argv)
     try:
         (run_train if args.command == "train" else run_deploy)(args)

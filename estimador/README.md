@@ -80,7 +80,12 @@ normalmente. Mínimo técnico: 3 sessões com amostras elegíveis.
 
 Por campanha, `python -m campaign_tools.wknn train|deploy --campaign NOME` executa os três treinos
 (e a avaliação de spatial e temporal) e seleciona o bundle para teste posterior (padrão: `complete`);
-ver o roteiro 04, seção 12.
+o `deploy` também prepara o `runtime.conf` em modo manual (`TCC_MODE=manual`, `TCC_METHOD=wknn`,
+porta e intervalo de `tcc-location.conf`, `TCC_MODEL` = bundle implantado), sem iniciar o daemon.
+`python -m campaign_tools.position` faz uma inferência pontual com `estimador.live.run_estimate`
+(a mesma lógica de `estimador.live wknn`, que continua válido): sem argumentos usa o `runtime.conf`;
+com `--campaign NOME --model spatial|temporal|complete|deployed` testa cada bundle da campanha.
+Ver o roteiro 04, seção 12.
 
 ## Bundle WKNN
 

@@ -12,7 +12,8 @@
 
 Não grava banco, não repete leituras, não liga o GNSS nem altera configuração do modem e não usa
 TA, LPP nem geometria angular. Código de saída: 0 com estimativa válida; 1 sem estimativa ou com
-o FN990 indisponível; 2 para argumento, bundle ou cadastro inválido.
+o FN990 indisponível; 2 para argumento, bundle ou cadastro inválido. `run_estimate` e
+`print_estimate` são a mesma lógica reutilizada por `campaign_tools.position`.
 
 Uso (a partir de `codigo/`):
     python -m estimador.live wknn --port /dev/ttyUSB2 --model modelos/wknn_lte_spatial.json [--json]
@@ -72,6 +73,60 @@ def _print_text(estimate: PositionEstimate) -> None:
     print(timings)
 
 
+def print_estimate(estimate: PositionEstimate, as_json: bool) -> None:
+    if as_json:
+        print(estimate_json(estimate))
+    else:
+        _print_text(estimate)
+
+
+def estimate_json(estimate: PositionEstimate) -> str:
+    return json.dumps(estimate.to_dict(), indent=2, ensure_ascii=False)
+
+
+class LiveInputError(ValueError):
+    """Bundle ou cadastro inválido ou incompatível (detectado antes de abrir a porta)."""
+
+
+class LiveHardwareError(RuntimeError):
+    """FN990 indisponível na porta informada."""
+
+
+def run_estimate(method: str, port: str, source: str, baudrate: int = 115200) -> PositionEstimate:
+    """1 leitura do FN990 -> 1 estimativa. `source` é o bundle WKNN (wknn) ou o cadastro (cell-id).
+
+    Valida a fonte antes de abrir a porta e inclui os tempos em `metadata["timings_s"]`.
+    """
+    t0 = start = time.perf_counter()
+    model = registry = None
+    if method == "wknn":
+        try:
+            model = load_bundle(source)
+        except (BundleError, OSError) as exc:
+            raise LiveInputError(f"bundle inválido ou incompatível: {exc}") from exc
+    else:
+        registry = load_registry(source)
+        if not registry.valid:
+            raise LiveInputError(f"invalid_registry: {registry.error}")
+    timings = {"load_s": time.perf_counter() - start}
+
+    driver = FN990Driver()
+    try:
+        driver.connect(port, baudrate=baudrate)
+    except (ConnectionError, OSError) as exc:
+        raise LiveHardwareError(f"FN990 indisponível: {exc}") from exc
+    try:
+        snapshot = take_snapshot(driver)
+    finally:
+        driver.close()
+    start = time.perf_counter()
+    estimate = estimate_from_snapshot(snapshot, model, registry)
+    timings["estimate_s"] = time.perf_counter() - start
+    timings["end_to_end_s"] = time.perf_counter() - t0  # carga + conexão + leitura + estimativa
+    estimate.metadata["timings_s"] = timings
+    return estimate
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Inferência atual com 1 leitura do FN990 (WKNN ou Cell-ID)")
     sub = parser.add_subparsers(dest="method", required=True)
@@ -86,37 +141,14 @@ def main(argv=None) -> int:
         p.add_argument("--json", action="store_true", help="resultado completo em JSON")
     args = parser.parse_args(argv)
 
-    t0 = start = time.perf_counter()
-    model = registry = None
-    if args.method == "wknn":
-        try:
-            model = load_bundle(args.model)
-        except (BundleError, OSError) as exc:
-            parser.error(f"bundle inválido ou incompatível: {exc}")
-    else:
-        registry = load_registry(args.registry)
-        if not registry.valid:
-            parser.error(f"invalid_registry: {registry.error}")
-    timings = {"load_s": time.perf_counter() - start}
-
-    driver = FN990Driver()
     try:
-        driver.connect(args.port, baudrate=args.baudrate)
-    except (ConnectionError, OSError) as exc:
-        raise SystemExit(f"erro: FN990 indisponível: {exc}") from exc
-    try:
-        snapshot = take_snapshot(driver)
-    finally:
-        driver.close()
-    start = time.perf_counter()
-    estimate = estimate_from_snapshot(snapshot, model, registry)
-    timings["estimate_s"] = time.perf_counter() - start
-    timings["end_to_end_s"] = time.perf_counter() - t0  # carga + conexão + leitura + estimativa
-    estimate.metadata["timings_s"] = timings
-    if args.json:
-        print(json.dumps(estimate.to_dict(), indent=2, ensure_ascii=False))
-    else:
-        _print_text(estimate)
+        estimate = run_estimate(args.method, args.port, args.model if args.method == "wknn" else args.registry,
+                                args.baudrate)
+    except LiveInputError as exc:
+        parser.error(str(exc))
+    except LiveHardwareError as exc:
+        raise SystemExit(f"erro: {exc}") from exc
+    print_estimate(estimate, args.json)
     return 0 if estimate.valid else 1
 
 

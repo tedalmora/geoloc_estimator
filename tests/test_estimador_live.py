@@ -93,6 +93,24 @@ def test_wknn_com_snapshot_completo(monkeypatch, sem_espera, capsys, modelo):
     assert set(t) == {"load_s", "estimate_s", "end_to_end_s"} and t["end_to_end_s"] >= t["load_s"] + t["estimate_s"]
 
 
+def test_run_estimate_e_a_mesma_logica_da_cli_e_validacao_previa(monkeypatch, sem_espera, capsys, modelo, tmp_path):
+    caminho, _ = modelo
+    driver = driver_com(leitura(), sem_espera)
+    driver.connect = lambda *args, **kwargs: None
+    monkeypatch.setattr(live, "FN990Driver", lambda: driver)
+    estimativa = live.run_estimate("wknn", "P", caminho)
+    _, via_cli, _ = resultado(monkeypatch, sem_espera, capsys, leitura(), "wknn", "--port", "P", "--model", caminho)
+    direto = json.loads(live.estimate_json(estimativa))
+    for r in (direto, via_cli):
+        r["metadata"].pop("timings_s")
+        r["metadata"]["snapshot"].pop("started_at")
+        r["metadata"]["snapshot"].pop("timings_s")
+    assert direto == via_cli
+    monkeypatch.setattr(live, "FN990Driver", lambda: pytest.fail("a porta não deveria ser aberta"))
+    with pytest.raises(live.LiveInputError, match="bundle inválido"):
+        live.run_estimate("wknn", "P", str(tmp_path / "inexistente.json"))
+
+
 def test_wknn_com_snapshot_parcial_suficiente(monkeypatch, sem_espera, capsys, modelo):
     roteiro = leitura(**{"AT$GPSACP": "gpsacp_sem_fix.txt"})
     codigo, r, _ = resultado(monkeypatch, sem_espera, capsys, roteiro, "wknn", "--port", "P", "--model", modelo[0])

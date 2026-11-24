@@ -11,7 +11,9 @@ from unittest.mock import Mock, call
 
 import pytest
 
-from campaign_tools import check, config, configure, export, manifest, monitor, prepare, reference, visit, wknn
+from campaign_tools import check, config, configure, export, manifest, monitor, position, prepare, reference, visit, wknn
+from estimador.estimate import PositionEstimate
+from runtime import daemon as runtime_daemon
 from coletor import db
 from hal.models import CellObservation, GnssFix, GnssReading, PrepareResult, ServInfoReading
 
@@ -307,6 +309,8 @@ def _prepare_env(tmp_path, monkeypatch):
     path = config.save_config(tmp_path / config.CONFIG_NAME, _location_config(tmp_path))
     monkeypatch.setattr(config, "SYSTEM_CONFIG", path)
     monkeypatch.setattr(config, "user_config_path", lambda: tmp_path / "absent")
+    monkeypatch.setattr(config, "SYSTEM_RUNTIME_CONFIG", tmp_path / "etc" / "runtime.conf")
+    monkeypatch.setattr(config, "user_runtime_config_path", lambda: tmp_path / "home" / "runtime.conf")
     return path
 
 
@@ -1323,3 +1327,247 @@ def test_wknn_deploy_does_not_touch_hardware_and_needs_a_trained_bundle(tmp_path
     code, out, err = _wknn(capsys, "deploy", "--campaign", "coleta")
     assert code == 1 and "execute 'campaign_tools.wknn train' antes" in err
     assert not (results / "modelos" / "deployed").exists()
+
+
+RUNTIME_KEYS = ("TCC_MODE", "TCC_METHOD", "TCC_PORT", "TCC_INTERVAL", "TCC_MODEL", "TCC_REGISTRY", "TCC_OUTPUT",
+                "TCC_HISTORY", "TCC_LOG")
+
+
+def _runtime_values(path):
+    return dict(line.split("=", 1) for line in Path(path).read_text(encoding="utf-8").splitlines()
+                if line and not line.startswith("#"))
+
+
+def _deploy(capsys, *extra, model=None):
+    args = ["deploy", "--campaign", "coleta", *extra] + ([] if model is None else ["--model", model])
+    return _wknn(capsys, *args)
+
+
+def _fake_live(monkeypatch, status="valid"):
+    calls = []
+
+    def run_estimate(method, port, source, baudrate=115200):
+        calls.append({"method": method, "port": port, "source": source})
+        return PositionEstimate("wknn", status, lat=-26.9, lon=-49.07, x_m=1.0, y_m=2.0, technology="LTE",
+                                reason=None if status == "valid" else "sem estimativa",
+                                snapshot_status="complete",
+                                metadata={"snapshot": {"started_at": "t", "reasons": [], "access_mode": "LTE",
+                                                       "serving_global_cell_key": None, "timings_s": {}},
+                                          "timings_s": {"load_s": 0.0, "estimate_s": 0.0, "end_to_end_s": 0.0},
+                                          "n_observed_keys": 1, "n_ignored_keys": 0})
+
+    monkeypatch.setattr(position.live, "run_estimate", run_estimate)
+    monkeypatch.setattr(position.live.FN990Driver, "connect",
+                        lambda *a, **k: pytest.fail("os testes nao acessam o modem"))
+    return calls
+
+
+@pytest.mark.parametrize("model", ["spatial", "temporal", "complete"])
+def test_position_with_campaign_resolves_each_trained_model(trained, monkeypatch, capsys, model):
+    calls = _fake_live(monkeypatch)
+    code, out, err = _wknn_position(capsys, "--campaign", "coleta", "--model", model, "--json")
+    assert code == 0, err
+    assert calls == [{"method": "wknn", "port": "/dev/ttyUSB2",
+                      "source": str(trained / "modelos" / f"wknn_lte_{model}.json")}]
+    assert json.loads(out)["method"] == "wknn"
+
+
+def _wknn_position(capsys, *argv):
+    code = position._main(list(argv))
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+@pytest.mark.parametrize("extra", [[], ["--model", "deployed"]])
+def test_position_uses_deployed_by_default_and_verifies_deployment(trained, monkeypatch, capsys, extra):
+    calls = _fake_live(monkeypatch)
+    code, out, err = _wknn_position(capsys, "--campaign", "coleta", *extra, "--json")
+    assert code == 2 and "deploy ausente" in err and not calls
+    assert _deploy(capsys, model="temporal")[0] == 0
+    code, out, err = _wknn_position(capsys, "--campaign", "coleta", *extra, "--json")
+    assert code == 0, err
+    assert calls[0]["source"] == str(trained / "modelos" / "deployed" / "wknn_lte.json")
+    assert "deployed (temporal)" in err
+
+
+def test_position_refuses_deployed_bundle_with_divergent_hash(trained, monkeypatch, capsys):
+    calls = _fake_live(monkeypatch)
+    assert _deploy(capsys)[0] == 0
+    deployed = trained / "modelos" / "deployed" / "wknn_lte.json"
+    deployed.write_bytes(deployed.read_bytes() + b" ")
+    code, out, err = _wknn_position(capsys, "--campaign", "coleta", "--json")
+    assert code == 2 and "hash divergente" in err and not calls
+
+
+def test_position_without_campaign_uses_runtime_conf_in_manual_mode(trained, monkeypatch, capsys):
+    calls = _fake_live(monkeypatch)
+    assert _deploy(capsys)[0] == 0
+    runtime = config.user_runtime_config_path()
+    values = _runtime_values(runtime)
+    assert values["TCC_MODE"] == "manual"
+    code, out, err = _wknn_position(capsys, "--json")
+    assert code == 0, err
+    assert calls == [{"method": "wknn", "port": values["TCC_PORT"], "source": values["TCC_MODEL"]}]
+    assert _runtime_values(runtime) == values  # modo e arquivo intactos
+
+
+def test_position_requires_wknn_runtime_and_clear_errors_without_it(trained, monkeypatch, capsys):
+    calls = _fake_live(monkeypatch)
+    code, out, err = _wknn_position(capsys, "--json")
+    assert code == 2 and "runtime.conf ausente" in err
+    assert _deploy(capsys)[0] == 0
+    runtime = config.user_runtime_config_path()
+    runtime.write_text(runtime.read_text(encoding="utf-8").replace("TCC_METHOD=wknn", "TCC_METHOD=cell-id"),
+                       encoding="utf-8")
+    code, out, err = _wknn_position(capsys, "--json")
+    assert code == 2 and "TCC_METHOD=cell-id" in err and not calls
+    code, out, err = _wknn_position(capsys, "--model", "complete", "--json")
+    assert code == 2 and "--model exige --campaign" in err
+
+
+def test_position_technical_overrides_take_precedence(trained, monkeypatch, capsys):
+    calls = _fake_live(monkeypatch)
+    assert _deploy(capsys)[0] == 0
+    other = trained / "modelos" / "wknn_lte_spatial.json"
+    code, out, err = _wknn_position(capsys, "--port", "/dev/ttyACM0", "--bundle", str(other), "--json")
+    assert code == 0, err
+    code, out, err = _wknn_position(capsys, "--campaign", "coleta", "--model", "complete", "--port", "/dev/ttyUSB9",
+                                    "--bundle", str(other), "--json")
+    assert code == 0, err
+    assert [(c["port"], c["source"]) for c in calls] == [("/dev/ttyACM0", str(other)), ("/dev/ttyUSB9", str(other))]
+
+
+def test_position_out_writes_json_atomically_and_refuses_existing(trained, monkeypatch, capsys, tmp_path):
+    _fake_live(monkeypatch)
+    out_path = tmp_path / "live" / "complete" / "P01_T1.json"
+    before = _tree_bytes(trained)
+    argv = ("--campaign", "coleta", "--model", "complete", "--json", "--out", str(out_path))
+    code, out, err = _wknn_position(capsys, *argv)
+    assert code == 0 and json.loads(out_path.read_text(encoding="utf-8")) == json.loads(out)
+    assert not list(out_path.parent.glob("*.tmp")) and _tree_bytes(trained) == before
+    first = out_path.read_bytes()
+    out_path.write_text("antigo\n", encoding="utf-8")
+    code, out, err = _wknn_position(capsys, *argv)
+    assert code == 2 and "ja existe" in err and out_path.read_text(encoding="utf-8") == "antigo\n"
+    code, out, err = _wknn_position(capsys, *argv, "--force")
+    assert code == 0 and out_path.read_bytes() == first and _tree_bytes(trained) == before
+
+
+def test_position_reports_unavailable_hardware_and_no_estimate(trained, monkeypatch, capsys):
+    def no_modem(*args, **kwargs):
+        raise position.live.LiveHardwareError("sem porta")
+
+    monkeypatch.setattr(position.live, "run_estimate", no_modem)
+    code, out, err = _wknn_position(capsys, "--campaign", "coleta", "--model", "complete")
+    assert code == 1 and "hardware indisponivel: sem porta" in err
+    _fake_live(monkeypatch, status="unavailable")
+    assert _wknn_position(capsys, "--campaign", "coleta", "--model", "complete", "--json")[0] == 1
+
+
+@pytest.mark.parametrize("model", [None, "spatial", "temporal"])
+def test_deploy_prepares_manual_runtime_conf_pointing_to_deployed_bundle(trained, monkeypatch, capsys, model):
+    monkeypatch.setattr(runtime_daemon, "main", lambda *a, **k: pytest.fail("deploy nao inicia o daemon"))
+    monkeypatch.setattr(runtime_daemon, "run_loop", lambda *a, **k: pytest.fail("deploy nao inicia o daemon"))
+    before = {path: data for path, data in _tree_bytes(trained).items() if "deployed" not in path.parts}
+    code, out, err = _deploy(capsys, model=model)
+    assert code == 0, err
+    runtime = config.user_runtime_config_path()
+    values = _runtime_values(runtime)
+    deployed = trained / "modelos" / "deployed" / "wknn_lte.json"
+    selected = model or "complete"
+    assert set(values) == set(RUNTIME_KEYS)
+    assert (values["TCC_MODE"], values["TCC_METHOD"], values["TCC_PORT"], values["TCC_INTERVAL"],
+            values["TCC_MODEL"], values["TCC_REGISTRY"]) == ("manual", "wknn", "/dev/ttyUSB2", "90", str(deployed), "")
+    assert values["TCC_OUTPUT"].startswith(str(config.find_config().parent / "data" / "runtime"))
+    assert runtime_daemon.load_config(str(runtime)).mode == "manual"
+    assert deployed.read_bytes() == (trained / "modelos" / f"wknn_lte_{selected}.json").read_bytes()
+    assert "runtime.conf preparado" in out and "Modo: manual" in out and "python -m campaign_tools.position" in out
+    assert {path: data for path, data in _tree_bytes(trained).items() if "deployed" not in path.parts} == before
+
+
+def test_runtime_conf_resolution_order_explicit_user_system_then_system_default(tmp_path, monkeypatch):
+    _prepare_env(tmp_path, monkeypatch)
+    system, user, explicit = config.SYSTEM_RUNTIME_CONFIG, config.user_runtime_config_path(), tmp_path / "x.conf"
+    assert config.find_runtime_config() is None
+    system.parent.mkdir(parents=True)
+    system.write_text("s\n", encoding="utf-8")
+    assert config.find_runtime_config() == system  # Buildroot: sem arquivo do usuario, /etc/tcc e encontrado
+    user.parent.mkdir(parents=True)
+    user.write_text("u\n", encoding="utf-8")
+    assert config.find_runtime_config() == user  # o arquivo do usuario vence o global antigo
+    explicit.write_text("e\n", encoding="utf-8")
+    assert config.find_runtime_config(explicit) == explicit
+    with pytest.raises(FileNotFoundError):
+        config.find_runtime_config(tmp_path / "ausente.conf")
+    assert config.default_runtime_config("raspberrypi_os") == user  # sem sudo
+    assert config.default_runtime_config("buildroot") == system
+
+
+@pytest.mark.parametrize("system_name,expected", [("raspberrypi_os", "user"), ("buildroot", "system")])
+def test_deploy_creates_runtime_conf_where_the_system_requires(trained, capsys, tmp_path, system_name, expected):
+    location = config.load_config(config.SYSTEM_CONFIG)
+    config.save_config(config.SYSTEM_CONFIG, {**location, "system": system_name}, force=True)
+    user, system = config.user_runtime_config_path(), config.SYSTEM_RUNTIME_CONFIG
+    code, out, err = _deploy(capsys)
+    assert code == 0, err
+    created, other = (user, system) if expected == "user" else (system, user)
+    assert created.is_file() and not other.exists()
+
+
+def test_deploy_prefers_the_user_runtime_conf_over_an_old_system_one(trained, capsys):
+    system, user = config.SYSTEM_RUNTIME_CONFIG, config.user_runtime_config_path()
+    assert _deploy(capsys)[0] == 0 and user.is_file()  # sem nenhum arquivo, cria o do usuario
+    system.parent.mkdir(parents=True)
+    system.write_text("TCC_MODE=runtime\n", encoding="utf-8")  # global antigo: nao deve ser tocado nem exigir sudo
+    code, out, err = _deploy(capsys, model="spatial")
+    assert code == 0, err
+    assert str(user) in out and system.read_text(encoding="utf-8") == "TCC_MODE=runtime\n"
+    assert _runtime_values(user)["TCC_MODE"] == "manual"
+    user.unlink()
+    code, out, err = _deploy(capsys)  # sem arquivo do usuario, o /etc/tcc existente e o encontrado
+    assert code == 1 and "incompativel" in err and str(system) in err and not user.exists()
+
+
+def test_deploy_no_runtime_config_keeps_previous_behavior(trained, capsys, tmp_path):
+    code, out, err = _deploy(capsys, "--no-runtime-config")
+    assert code == 0, err
+    assert not config.user_runtime_config_path().exists() and "runtime.conf nao alterado" in out
+    explicit = tmp_path / "custom" / "runtime.conf"
+    code, out, err = _deploy(capsys, "--runtime-config", str(explicit))
+    assert code == 0 and explicit.is_file() and not config.user_runtime_config_path().exists()
+    assert f"--runtime-config {explicit}" in out
+    with pytest.raises(SystemExit):
+        _deploy(capsys, "--runtime-config", str(explicit), "--no-runtime-config")
+
+
+def test_deploy_updates_only_managed_fields_of_an_existing_runtime_conf(trained, capsys):
+    runtime = config.user_runtime_config_path()
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_text(
+        "# minha configuracao\nTCC_MODE=manual\nTCC_METHOD=cell-id\nTCC_PORT=/dev/ttyUSB0\nTCC_INTERVAL=240\n"
+        "TCC_MODEL=/antigo.json\nTCC_REGISTRY=/data/registro.json\nTCC_OUTPUT=/x/latest.json\n"
+        "TCC_HISTORY=/x/history.jsonl\nTCC_LOG=/x/runtime.log\n", encoding="utf-8")
+    original = runtime.read_bytes()
+    code, out, err = _deploy(capsys)
+    assert code == 0, err
+    values = _runtime_values(runtime)
+    assert (values["TCC_MODE"], values["TCC_METHOD"], values["TCC_PORT"], values["TCC_INTERVAL"]) == (
+        "manual", "wknn", "/dev/ttyUSB2", "90")
+    assert (values["TCC_REGISTRY"], values["TCC_OUTPUT"], values["TCC_LOG"]) == (
+        "/data/registro.json", "/x/latest.json", "/x/runtime.log")
+    assert runtime.read_text(encoding="utf-8").startswith("# minha configuracao\n")
+    assert runtime.with_name("runtime.conf.bak").read_bytes() == original
+    assert "TCC_METHOD: cell-id -> wknn" in out
+
+
+@pytest.mark.parametrize("content,message", [
+    ("TCC_MODE=runtime\n" + "".join(f"{k}=x\n" for k in RUNTIME_KEYS[1:]), "TCC_MODE=runtime"),
+    ("TCC_MODE=manual\nOUTRA=1\n", "incompativel"),
+])
+def test_deploy_does_not_overwrite_incompatible_runtime_conf(trained, capsys, content, message):
+    runtime = config.user_runtime_config_path()
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_text(content, encoding="utf-8")
+    code, out, err = _deploy(capsys)
+    assert code == 1 and message in err and runtime.read_text(encoding="utf-8") == content
+    assert not (trained / "modelos" / "deployed").exists()

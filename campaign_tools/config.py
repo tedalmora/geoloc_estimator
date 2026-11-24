@@ -17,6 +17,34 @@ def user_config_path() -> Path:
     return Path.home() / ".config" / "tcc" / CONFIG_NAME
 
 
+RUNTIME_CONFIG_NAME = "runtime.conf"
+SYSTEM_RUNTIME_CONFIG = Path("/etc/tcc") / RUNTIME_CONFIG_NAME
+
+
+def user_runtime_config_path() -> Path:
+    return Path.home() / ".config" / "tcc" / RUNTIME_CONFIG_NAME
+
+
+def find_runtime_config(path: Optional[PathLike] = None) -> Optional[Path]:
+    """runtime.conf explícito, depois ~/.config/tcc (usuário, sem sudo) e por último /etc/tcc."""
+    if path is not None:
+        target = Path(path).expanduser()
+        if not target.is_file():
+            raise FileNotFoundError(f"runtime.conf ausente: {target}")
+        return target
+    for target in (user_runtime_config_path(), SYSTEM_RUNTIME_CONFIG):
+        if target.exists():
+            if not target.is_file():
+                raise ValueError(f"runtime.conf nao e arquivo: {target}")
+            return target
+    return None
+
+
+def default_runtime_config(system: Optional[str]) -> Path:
+    """Destino de um runtime.conf novo: /etc/tcc no Buildroot, ~/.config/tcc no Raspberry Pi OS."""
+    return SYSTEM_RUNTIME_CONFIG if system == "buildroot" else user_runtime_config_path()
+
+
 def find_config(path: Optional[PathLike] = None) -> Optional[Path]:
     if path is not None:
         target = Path(path).expanduser()

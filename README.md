@@ -341,8 +341,13 @@ O Cell-ID devolve a posição cadastrada da célula servidora (busca pela `globa
 # fluxo normal de uma campanha já adquirida (campaign_tools.check aprovado): treina e avalia
 # spatial e temporal e treina o complete (todos os dados elegíveis, sem avaliação independente)
 python -m campaign_tools.wknn train --campaign preliminar-interna
-# depois de revisar as avaliações: copia o bundle (padrão: complete) para modelos/deployed/
+# depois de revisar as avaliações: copia o bundle (padrão: complete) para modelos/deployed/ e prepara
+# o runtime.conf em modo manual (TCC_MODE=manual; não inicia o daemon)
 python -m campaign_tools.wknn deploy --campaign preliminar-interna            # --model spatial|temporal
+# inferência pontual: 1 leitura do FN990 usando o runtime.conf (porta e modelo); não inicia o daemon
+python -m campaign_tools.position
+# desenvolvedor: testa cada modelo da campanha (spatial|temporal|complete|deployed; padrão deployed)
+python -m campaign_tools.position --campaign preliminar-interna --model spatial
 
 # comandos técnicos individuais (reprodução detalhada)
 # treino (spatial = grupo por ponto de referência; temporal = grupo por sessão; complete = sem teste)
