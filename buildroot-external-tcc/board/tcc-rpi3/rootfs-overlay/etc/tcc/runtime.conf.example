@@ -8,3 +8,12 @@ TCC_REGISTRY=/data/tcc/registry/network_registry.json
 TCC_OUTPUT=/data/tcc/runtime/latest_position.json
 TCC_HISTORY=/data/tcc/runtime/history.jsonl
 TCC_LOG=/var/log/tcc/runtime.log
+# TCC_DEBUG=0 e o modo normal (latest_position.json, history.jsonl e runtime.log apenas).
+# TCC_DEBUG=1 e a instrumentacao de engenharia: mesma aquisicao e inferencia, mais metricas do
+# sistema, um snapshot bruto por ciclo e um manifesto da execucao. Os tres caminhos abaixo podem
+# ficar vazios; com TCC_DEBUG=1 o padrao e a pasta de TCC_OUTPUT (runtime_metrics.csv, snapshots/,
+# runtime_manifest.json).
+TCC_DEBUG=0
+TCC_METRICS=
+TCC_SNAPSHOTS_DIR=
+TCC_RUN_MANIFEST=

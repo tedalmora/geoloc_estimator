@@ -148,6 +148,62 @@ condicionado à configuração e não depende do FN990 para manter o hotspot/SSH
 tentativas de inferência; não registra cada espera de poucos segundos. Durante campanhas,
 mantenha `TCC_MODE=manual` e use `campaign_tools`; a coleta nunca começa automaticamente.
 
+### Perfis do runtime: normal (`TCC_DEBUG=0`) e debug (`TCC_DEBUG=1`)
+
+O mesmo `runtime.daemon` tem dois perfis, escolhidos por `TCC_DEBUG` no `runtime.conf` (só `0` ou `1`;
+ausente vale `0`; outro valor é erro de configuração). O `campaign_tools.wknn deploy` gera
+`TCC_DEBUG=0`, `TCC_METRICS=`, `TCC_SNAPSHOTS_DIR=` e `TCC_RUN_MANIFEST=` e nunca ativa o debug.
+
+- **Normal (`TCC_DEBUG=0`, o produto):** baixo overhead, só `latest_position.json`, `history.jsonl` e
+  `runtime.log`. Sem sampler, sem snapshot bruto, sem manifesto, sem CSV de métricas.
+- **Debug (`TCC_DEBUG=1`, engenharia e comparação Raspberry Pi OS × Buildroot):** a mesma aquisição e a
+  mesma inferência, mais: campos extras por ciclo no `history.jsonl`; `runtime_metrics.csv` (CPU, RSS,
+  HWM, memória, temperatura, disco, pelo `campaign_tools.monitor.ProcessSampler`, 1 amostra/s, estados
+  `starting|waiting|acquiring|predicting|writing|failed|stopped`, `mode=runtime`, `session=<cycle_id>`);
+  `snapshots/<cycle_id>.json` (o `Snapshot` oficial do ciclo, escrito de forma atômica e nunca
+  sobrescrito); e `runtime_manifest.json` (plataforma, versão, commit se houver, intervalo, método,
+  porta, modelo e SHA-256, caminhos, CPU, memória; sem IMEI/IMSI/ICCID, senhas ou ambiente). Os três
+  caminhos novos podem ficar vazios: o padrão é a pasta de `TCC_OUTPUT`.
+
+O debug **não muda aquisição nem inferência**: mesmo `take_snapshot` (um por ciclo, MONI → SERVINFO →
+CSURV → GNSS), mesmo `estimate_from_snapshot`, mesmo `latest_position.json`, mesmo intervalo e mesmo
+tratamento de falhas. Ele não executa AT extra, não repete GNSS nem CSURV, e usa só a biblioteca padrão
+(`/proc`, `/sys`, `/etc/os-release`); nada de subprocesso, GNU time ou psutil. Falha ao gravar um arquivo
+de debug é registrada no log e não derruba o runtime. Exemplo Raspberry Pi OS:
+
+```
+TCC_MODE=runtime
+TCC_DEBUG=1
+TCC_OUTPUT=/home/tcc/tcc-dados/runtime-engineering/latest_position.json
+TCC_HISTORY=/home/tcc/tcc-dados/runtime-engineering/history.jsonl
+TCC_LOG=/home/tcc/tcc-dados/runtime-engineering/runtime.log
+TCC_METRICS=/home/tcc/tcc-dados/runtime-engineering/runtime_metrics.csv
+TCC_RUN_MANIFEST=/home/tcc/tcc-dados/runtime-engineering/runtime_manifest.json
+TCC_SNAPSHOTS_DIR=/home/tcc/tcc-dados/runtime-engineering/snapshots
+```
+
+No Buildroot a estrutura é idêntica sob `/data/tcc/runtime-engineering/`.
+
+**Campos do debug em cada ciclo do `history.jsonl`** (além dos operacionais de sempre):
+`cycle_id`, `scheduled_utc`, `started_utc`, `finished_utc`, `period_s` (início a início; `null` no primeiro
+ciclo), `schedule_delay_s` (atraso em relação ao instante agendado; a regra do intervalo não muda: o
+daemon espera `TCC_INTERVAL` depois de cada ciclo e nunca roda ciclos em paralelo, então um ciclo longo
+aparece como `period_s` maior), `cycle_total_s` (do início até a gravação de `latest_position.json`);
+aquisição (`snapshot_started_at`, `snapshot_status`, `snapshot_reasons`, `access_mode`, `moni_s`,
+`servinfo_s`, `csurv_s`, `gnss_s`, `snapshot_total_s`, contagens de observações e de `radio_key` LTE/NR,
+serving, `transport_error`, `anomaly_count`); inferência (`model_sha256`, `prediction_s`, `valid`, `lat`,
+`lon`, `x_m`, `y_m`, `n_observed_keys`, `n_ignored_keys`, `n_neighbors`, `zero_distance`); GNSS auxiliar
+(`gnss_status`, `gnss_lat`, `gnss_lon`, `gnss_alt_m`, `gnss_fix_type`, `gnss_hdop`, `gnss_nsat`, `gnss_utc`,
+`gnss_elapsed_s`, `wknn_gnss_distance_m`). Observações de células, respostas AT, vizinhos e pesos ficam só
+no snapshot bruto.
+
+**GNSS:** o `$GPSACP` já faz parte de todo snapshot; o debug só o registra (status real, e campos de
+posição `null` sem fix válido). O GNSS é observação auxiliar: não substitui a posição WKNN, não invalida o
+WKNN e **não é ground truth**. `wknn_gnss_distance_m` (distância geodésica WKNN × GNSS, só com os dois
+válidos) **não é erro absoluto** e não entra nas métricas formais de precisão. O erro formal de P01–P08,
+com a referência canônica da campanha, é medido por `campaign_tools.validate point`; o runtime debug mede a
+operação contínua. Os dois produzem os mesmos arquivos e métricas nos dois sistemas.
+
 **Pendências:** o driver USB serial, o VID/PID e a porta AT do FN990 ainda dependem de validação
 (`lsusb`/`dmesg` no Raspberry Pi), e `TCC_AT_PORT` fica vazio até lá. **A imagem ainda não foi compilada nem validada** (defconfig,
 build, `sdcard.img`, hotspot, Dropbear, boot e hardware pendentes).

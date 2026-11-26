@@ -1336,7 +1336,7 @@ def test_wknn_deploy_does_not_touch_hardware_and_needs_a_trained_bundle(tmp_path
 
 
 RUNTIME_KEYS = ("TCC_MODE", "TCC_METHOD", "TCC_PORT", "TCC_INTERVAL", "TCC_MODEL", "TCC_REGISTRY", "TCC_OUTPUT",
-                "TCC_HISTORY", "TCC_LOG")
+                "TCC_HISTORY", "TCC_LOG", "TCC_DEBUG", "TCC_METRICS", "TCC_SNAPSHOTS_DIR", "TCC_RUN_MANIFEST")
 
 
 def _runtime_values(path):
@@ -1486,6 +1486,9 @@ def test_deploy_prepares_manual_runtime_conf_pointing_to_deployed_bundle(trained
             values["TCC_MODEL"], values["TCC_REGISTRY"]) == ("manual", "wknn", "/dev/ttyUSB2", "90", str(deployed), "")
     assert values["TCC_OUTPUT"].startswith(str(config.find_config().parent / "data" / "runtime"))
     assert runtime_daemon.load_config(str(runtime)).mode == "manual"
+    assert (values["TCC_DEBUG"], values["TCC_METRICS"], values["TCC_SNAPSHOTS_DIR"], values["TCC_RUN_MANIFEST"]) == (
+        "0", "", "", "")  # o deploy normal nunca ativa o debug
+    assert runtime_daemon.load_config(str(runtime)).debug is False
     assert deployed.read_bytes() == (trained / "modelos" / f"wknn_lte_{selected}.json").read_bytes()
     assert "runtime.conf preparado" in out and "Modo: manual" in out and "python -m campaign_tools.position" in out
     assert {path: data for path, data in _tree_bytes(trained).items() if "deployed" not in path.parts} == before
@@ -1564,10 +1567,25 @@ def test_deploy_updates_only_managed_fields_of_an_existing_runtime_conf(trained,
     assert runtime.read_text(encoding="utf-8").startswith("# minha configuracao\n")
     assert runtime.with_name("runtime.conf.bak").read_bytes() == original
     assert "TCC_METHOD: cell-id -> wknn" in out
+    assert values["TCC_DEBUG"] == "0" and "TCC_DEBUG: (novo) -> 0" in out  # chave ausente recebe o padrao normal
+
+
+def test_deploy_preserves_an_existing_debug_choice_in_runtime_conf(trained, capsys):
+    runtime = config.user_runtime_config_path()
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_text(
+        "TCC_MODE=manual\nTCC_METHOD=wknn\nTCC_PORT=/dev/ttyUSB0\nTCC_INTERVAL=240\nTCC_MODEL=/antigo.json\n"
+        "TCC_REGISTRY=\nTCC_OUTPUT=/x/latest.json\nTCC_HISTORY=/x/history.jsonl\nTCC_LOG=/x/runtime.log\n"
+        "TCC_DEBUG=1\nTCC_METRICS=/x/m.csv\n", encoding="utf-8")
+    assert _deploy(capsys)[0] == 0
+    values = _runtime_values(runtime)
+    assert (values["TCC_DEBUG"], values["TCC_METRICS"]) == ("1", "/x/m.csv")
+    assert (values["TCC_SNAPSHOTS_DIR"], values["TCC_RUN_MANIFEST"]) == ("", "")
+    assert values["TCC_MODE"] == "manual" and runtime_daemon.load_config(str(runtime)).debug is True
 
 
 @pytest.mark.parametrize("content,message", [
-    ("TCC_MODE=runtime\n" + "".join(f"{k}=x\n" for k in RUNTIME_KEYS[1:]), "TCC_MODE=runtime"),
+    ("TCC_MODE=runtime\n" + "".join(f"{k}=x\n" for k in RUNTIME_KEYS[1:9]), "TCC_MODE=runtime"),
     ("TCC_MODE=manual\nOUTRA=1\n", "incompativel"),
 ])
 def test_deploy_does_not_overwrite_incompatible_runtime_conf(trained, capsys, content, message):
@@ -1969,6 +1987,49 @@ def test_process_sampler_uses_simulated_proc_and_sys_and_always_stops(tmp_path):
     sampler.stop()  # idempotent
     assert len(_rows(out)) == len(rows)
 
+
+def test_monitor_system_helpers_read_simulated_files_and_tolerate_missing_ones(tmp_path):
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    (proc / "cpuinfo").write_text("processor\t: 0\nprocessor\t: 1\nModel\t\t: Raspberry Pi 3\nHardware\t: BCM2835\n")
+    (proc / "meminfo").write_text("MemTotal:        948304 kB\nMemAvailable:    500000 kB\n")
+    release = tmp_path / "os-release"
+    release.write_text('ID=buildroot\nNAME="Buildroot"\nVERSION_ID=2025.02\nHOME_URL=x\n')
+    assert monitor.cpu_info(proc) == {"cores": 2, "Model": "Raspberry Pi 3", "Hardware": "BCM2835"}
+    assert monitor.memory_total_kb(proc) == 948304
+    assert monitor.os_release(release) == {"ID": "buildroot", "NAME": "Buildroot", "VERSION_ID": "2025.02"}
+    missing = tmp_path / "ausente"
+    assert (monitor.cpu_info(missing), monitor.memory_total_kb(missing), monitor.os_release(missing)) == (
+        None, None, None)
+
+
+def test_monitor_git_commit_reads_git_files_without_running_git(tmp_path):
+    assert monitor.git_commit(tmp_path) is None  # Buildroot: /opt/tcc sem .git
+    git = tmp_path / ".git"
+    (git / "refs" / "heads").mkdir(parents=True)
+    (git / "HEAD").write_text("ref: refs/heads/main\n")
+    assert monitor.git_commit(tmp_path) is None  # ref sem arquivo nem packed-refs
+    (git / "packed-refs").write_text("# pack-refs\n" + "a" * 40 + " refs/heads/main\n")
+    assert monitor.git_commit(tmp_path) == "a" * 40
+    (git / "refs" / "heads" / "main").write_text("b" * 40 + "\n")
+    assert monitor.git_commit(tmp_path) == "b" * 40
+    (git / "HEAD").write_text("c" * 40 + "\n")  # HEAD solto
+    assert monitor.git_commit(tmp_path) == "c" * 40
+
+
+def test_monitor_empty_db_path_leaves_database_bytes_empty_and_missing_sensors_do_not_fail(tmp_path):
+    sample = monitor.sample_resources("", tmp_path, proc_root=tmp_path / "sem-proc", sys_root=tmp_path / "sem-sys")
+    assert sample["database_bytes"] == "" and sample["temperature_c"] == "" and sample["cpu"] is None
+    out = tmp_path / "m.csv"
+    sampler = monitor.ProcessSampler("", tmp_path, out, "runtime", "", interval_s=0.01, proc_root=tmp_path / "sem-proc",
+                                     sys_root=tmp_path / "sem-sys")
+    sampler.set(state="waiting", session="run-C000001")
+    with sampler:
+        pass
+    rows = _rows(out)
+    assert rows[0]["state"] == "waiting" and rows[-1]["state"] == "completed"
+    assert {r["database_bytes"] for r in rows} == {""} and {r["temperature_c"] for r in rows} == {""}
+    assert {r["mode"] for r in rows} == {"runtime"} and rows[0]["session"] == "run-C000001"
 
 def test_validate_metrics_follow_stabilizing_acquiring_predicting_completed(trained, monkeypatch):
     _validate_point(monkeypatch, repetitions=1)

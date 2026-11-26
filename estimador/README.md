@@ -224,3 +224,20 @@ python -m campaign_tools.validate summarize --campaign casa-8-pontos-rpios      
   duplicados e arquivos ilegíveis (saída 1) e informa se está pronto para comparar com a outra
   plataforma.
 
+## Runtime: perfil normal e perfil debug (`TCC_DEBUG`)
+
+O `runtime/daemon.py` reutiliza `acquisition.take_snapshot` e `estimate_from_snapshot` (a mesma
+inferência do `live.py`). `TCC_DEBUG=0` (padrão) é o produto: `latest_position.json`, `history.jsonl` e
+`runtime.log`, sem arquivos de engenharia. `TCC_DEBUG=1` executa exatamente a mesma aquisição e
+inferência (um snapshot e uma estimativa por ciclo, nenhum AT extra) e só observa: campos extras por ciclo
+no histórico, `runtime_metrics.csv` (`ProcessSampler`, `mode=runtime`, `session=<cycle_id>`), um
+`snapshots/<cycle_id>.json` por ciclo e `runtime_manifest.json`. Os campos e arquivos são idênticos no
+Raspberry Pi OS e no Buildroot e permitem comparar cobertura, falhas, periodicidade, atraso de
+agendamento, latências MONI/SERVINFO/CSURV/GNSS, tempo de predição, CPU, memória, temperatura, observações
+e `radio_key` LTE/NR, estabilidade da posição e disponibilidade/qualidade do GNSS.
+
+O GNSS do ciclo é observação auxiliar: não substitui o WKNN e não é ground truth.
+`wknn_gnss_distance_m` é uma distância auxiliar WKNN × GNSS (só com os dois válidos), não o `error_m`
+das avaliações; o erro formal em P01–P08 vem da referência canônica, em `campaign_tools.validate point`.
+Detalhes, exemplos de configuração e lista de campos: `README.md` (seção Runtime autônomo).
+

@@ -79,6 +79,8 @@ def _process_stats(pid, proc_root):
 
 
 def _database_size(db_path):
+    if not db_path:  # runtime and other modes without an operational database
+        return ""
     total = 0
     found = False
     for path in (Path(db_path), Path(f"{db_path}-wal")):
@@ -242,6 +244,64 @@ def run_collection(db_path, data_dir, output, log_path, point, session, command,
         metrics_stream.close()
 
 
+def _read_text(path):
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def os_release(path="/etc/os-release"):
+    """ID, NAME, VERSION, VERSION_ID and PRETTY_NAME of /etc/os-release; None when unreadable."""
+    values = {}
+    for line in (_read_text(path) or "").splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key in ("ID", "NAME", "VERSION", "VERSION_ID", "PRETTY_NAME"):
+            values[key] = value.strip().strip("\"'")
+    return values or None
+
+
+def cpu_info(proc_root="/proc"):
+    """Core count and model identification from /proc/cpuinfo; None when unreadable."""
+    text = _read_text(Path(proc_root) / "cpuinfo")
+    if text is None:
+        return None
+    info = {"cores": sum(1 for line in text.splitlines() if line.startswith("processor"))}
+    for line in text.splitlines():
+        key, _, value = line.partition(":")
+        key = key.strip()
+        if key in ("model name", "Model", "Hardware", "CPU part", "Revision") and key not in info:
+            info[key] = value.strip()
+    return info
+
+
+def memory_total_kb(proc_root="/proc"):
+    for line in (_read_text(Path(proc_root) / "meminfo") or "").splitlines():
+        if line.startswith("MemTotal:"):
+            try:
+                return int(line.split()[1])
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
+def git_commit(root):
+    """HEAD commit read from .git files (no git subprocess); None when unavailable, e.g. Buildroot."""
+    git = Path(root) / ".git"
+    head = (_read_text(git / "HEAD") or "").strip()
+    if not head.startswith("ref:"):
+        return head or None
+    ref = head.partition(":")[2].strip()
+    commit = (_read_text(git / ref) or "").strip()
+    if commit:
+        return commit
+    for line in (_read_text(git / "packed-refs") or "").splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == ref and not line.startswith(("#", "^")):
+            return parts[0]
+    return None
+
+
 def _clock_ticks():
     sysconf = getattr(os, "sysconf", None)
     try:
@@ -254,7 +314,9 @@ class ProcessSampler:
     """Samples the current process (and the system) in a background thread into a metrics CSV.
 
     Reuses sample_resources/_metric_row, so rows match the other monitor modes. State and session
-    are set by the caller; stop() always joins the thread and writes one final sample.
+    are set by the caller; stop() always joins the thread and writes one final sample. set() takes
+    no lock (plain attribute assignment), so changing state never waits for a sample in progress.
+    An empty db_path leaves database_bytes empty.
     """
 
     def __init__(self, db_path, data_dir, output, mode, point, interval_s=1.0, pid=None,
@@ -269,7 +331,6 @@ class ProcessSampler:
         self._state = ""
         self._session = ""
         self._stop = threading.Event()
-        self._lock = threading.Lock()
         self._thread = None
         self._stream = self._writer = None
         self._previous = (None, None, None)
@@ -277,18 +338,16 @@ class ProcessSampler:
         self.error = None
 
     def set(self, state=None, session=None):
-        with self._lock:
-            if state is not None:
-                self._state = state
-            if session is not None:
-                self._session = session
+        if state is not None:
+            self._state = state
+        if session is not None:
+            self._session = session
 
     def _sample(self):
-        with self._lock:
-            sample = sample_resources(*self._args, state=self._state, session=self._session, **self._kwargs)
-            row, *self._previous = _metric_row(sample, *self._previous, self._clock_ticks)
-            self._writer.writerow(row)
-            self._stream.flush()
+        sample = sample_resources(*self._args, state=self._state, session=self._session, **self._kwargs)
+        row, *self._previous = _metric_row(sample, *self._previous, self._clock_ticks)
+        self._writer.writerow(row)
+        self._stream.flush()
 
     def _run(self):
         try:

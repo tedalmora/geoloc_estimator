@@ -32,6 +32,7 @@ from . import check, config, prepare
 
 MODEL_PROTOCOLS = (PROTOCOL_SPATIAL, PROTOCOL_TEMPORAL, PROTOCOL_COMPLETE)
 DEPLOY_DIR = "deployed"
+DEBUG_DEFAULTS = {"TCC_DEBUG": "0", "TCC_METRICS": "", "TCC_SNAPSHOTS_DIR": "", "TCC_RUN_MANIFEST": ""}
 
 
 def load_context(campaign, config_path):
@@ -228,9 +229,10 @@ def plan_runtime_config(target, location, deployed_bundle):
         values = {
             "TCC_MODE": "manual", **managed, "TCC_REGISTRY": "",
             "TCC_OUTPUT": str(runtime_dir / "latest_position.json"),
-            "TCC_HISTORY": str(runtime_dir / "history.jsonl"), "TCC_LOG": log,
+            "TCC_HISTORY": str(runtime_dir / "history.jsonl"), "TCC_LOG": log, **DEBUG_DEFAULTS,
         }
         text = "# Gerado por campaign_tools.wknn deploy; TCC_MODE=manual: o runtime nao inicia sozinho.\n"
+        text += "# TCC_DEBUG=0 e o modo normal; TCC_DEBUG=1 (instrumentacao de engenharia) so por escolha explicita.\n"
         text += "".join(f"{key}={value}\n" for key, value in values.items())
         return text, [(key, None, value) for key, value in managed.items()]
     try:
@@ -242,11 +244,17 @@ def plan_runtime_config(target, location, deployed_bundle):
                          "(ajuste manualmente ou use --no-runtime-config)")
     old = {"TCC_METHOD": current.method, "TCC_PORT": current.port, "TCC_INTERVAL": current.interval,
            "TCC_MODEL": current.model}
-    lines = []
+    lines, present = [], set()
     for line in target.read_text(encoding="utf-8").splitlines():
         key = line.partition("=")[0].strip()
+        if not line.lstrip().startswith("#"):
+            present.add(key)
         lines.append(f"{key}={managed[key]}" if key in managed and not line.lstrip().startswith("#") else line)
     changes = [(key, old[key], value) for key, value in managed.items() if old[key] != value]
+    for key, value in DEBUG_DEFAULTS.items():  # keys missing in an older file get the normal-mode default
+        if key not in present:
+            lines.append(f"{key}={value}")
+            changes.append((key, None, value))
     return "\n".join(lines) + "\n", changes
 
 
