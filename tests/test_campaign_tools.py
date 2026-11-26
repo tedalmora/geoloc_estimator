@@ -5,17 +5,23 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call
-
 import pytest
-
-from campaign_tools import check, config, configure, export, manifest, monitor, position, prepare, reference, visit, wknn
+from acquisition.snapshot import Snapshot
+from campaign_tools import (
+    check, config, configure, export, manifest, monitor, position, prepare, reference, validate, visit, wknn,
+)
 from estimador.estimate import PositionEstimate
+from estimador.geometry import haversine_m
 from runtime import daemon as runtime_daemon
 from coletor import db
-from hal.models import CellObservation, GnssFix, GnssReading, PrepareResult, ServInfoReading
+from hal.models import (
+    CellObservation, CsurvReading, GnssFix, GnssReading, MoniReading, PrepareResult, ServInfoReading,
+    ServingCellResolution,
+)
 
 
 def _location_config(tmp_path):
@@ -1571,3 +1577,545 @@ def test_deploy_does_not_overwrite_incompatible_runtime_conf(trained, capsys, co
     code, out, err = _deploy(capsys)
     assert code == 1 and message in err and runtime.read_text(encoding="utf-8") == content
     assert not (trained / "modelos" / "deployed").exists()
+
+
+# ------------------------------------------------------------------------------------ validate
+CELLS = ((3000, 10, "1", -60.0), (3001, 11, "2", -68.0), (3002, 12, "3", -76.0))
+
+
+def _cell(rat="LTE", arfcn=3000, pci=10, cell_id="1", rsrp=-60.0):
+    return CellObservation(rat=rat, source="CSURV", arfcn=arfcn, pci=pci, plmn="72406", cell_id=cell_id,
+                           rsrp_dbm=rsrp, cell_status="CELL_SUITABLE", record_format="full")
+
+
+def _snapshot(status="complete", cells=None, started="2026-11-26T12:00:00.000Z", transport_error=None):
+    observations = [_cell(arfcn=a, pci=p, cell_id=c, rsrp=r) for a, p, c, r in CELLS] if cells is None else cells
+    return Snapshot(
+        status=status, reasons=[] if status == "complete" else ["gnss:no_fix"], started_at=started, access_mode="LTE",
+        serving=ServingCellResolution(method="csurv", rat="LTE", radio_key="LTE:3000:10",
+                                      global_cell_key="LTE:72406:1"),
+        serving_rsrp_dbm=-60.0, serving_rsrq_db=-10.0, serving_sinr_db=None, observations=observations,
+        moni=MoniReading(status="ok"), servinfo=ServInfoReading(status="ok"),
+        csurv=CsurvReading(status="error" if status == "invalid" else "ok", observations=observations),
+        gnss=GnssReading(status="ok"),
+        timings_s={"MONI": 0.1, "SERVINFO": 0.2, "CSURV": 2.0, "GNSS": 0.3, "total": 2.6},
+        anomalies=["a"], transport_error=transport_error,
+    )
+
+
+class _Rig:
+    """Scripted modem: records connect/snapshot/close and hands out the given snapshots in order."""
+
+    def __init__(self, monkeypatch, snapshots, fail_connect=(), snapshot_error=None):
+        self.events, self.taken, self.snapshots = [], [], list(snapshots)
+        self.fail_connect, self.connects, self.snapshot_error = set(fail_connect), 0, snapshot_error
+        rig = self
+
+        class Driver:
+            def connect(self, port, *args, **kwargs):
+                rig.connects += 1
+                rig.events.append(("connect", port))
+                if rig.connects in rig.fail_connect:
+                    raise ConnectionError("sem porta")
+
+            def close(self):
+                rig.events.append(("close",))
+
+        def take(driver):
+            rig.events.append(("snapshot",))
+            if rig.snapshot_error:
+                raise rig.snapshot_error
+            rig.taken.append(rig.snapshots.pop(0))
+            return rig.taken[-1]
+
+        monkeypatch.setattr(validate, "FN990Driver", Driver)
+        monkeypatch.setattr(validate, "take_snapshot", take)
+        self.estimates = []
+        real = validate.estimate_from_snapshot
+
+        def spy(snapshot, model=None, registry=None):
+            self.estimates.append((snapshot, model.bundle["protocol"]))
+            return real(snapshot, model=model)
+
+        monkeypatch.setattr(validate, "estimate_from_snapshot", spy)
+
+
+def _vargs(**over):
+    values = dict(campaign="coleta", config=None, output=None, point="P01", repetitions=3,
+                  models="spatial,temporal,complete", stabilization_s=0, between_repetitions_s=0,
+                  metrics_interval_s=0.01, force=False)
+    return SimpleNamespace(**{**values, **over})
+
+
+def _run_point(args, answer="OK"):
+    return validate.run_point(args, input_fn=lambda _: answer, sleep=lambda seconds: None)
+
+
+def _validate_point(monkeypatch, point="P01", snapshots=None, **over):
+    rig = _Rig(monkeypatch, snapshots if snapshots is not None else [_snapshot(started=f"t{i}") for i in range(12)])
+    _run_point(_vargs(point=point, **over))
+    return rig
+
+
+def _rows(path):
+    with Path(path).open(newline="", encoding="utf-8") as stream:
+        return list(csv.DictReader(stream))
+
+
+def _vdir(results):
+    return results / "avaliacoes" / "validation"
+
+
+def _without_validation(root):
+    return {path: data for path, data in _tree_bytes(root).items() if "validation" not in path.parts}
+
+
+def test_validate_shares_one_snapshot_between_the_three_models(trained, monkeypatch):
+    rig = _validate_point(monkeypatch)
+    out = _vdir(trained)
+    assert len(rig.taken) == 3 and len(rig.estimates) == 9  # 1 snapshot (1 CSURV) por repeticao, 3 modelos cada
+    for index, snapshot in enumerate(rig.taken):
+        used = [(model, s) for s, model in rig.estimates[index * 3:index * 3 + 3]]
+        assert {id(s) for _, s in used} == {id(snapshot)} and {m for m, _ in used} == {"spatial", "temporal", "complete"}
+    acquisitions, predictions = _rows(out / "acquisitions.csv"), _rows(out / "predictions.csv")
+    assert len(acquisitions) == 3 and len(predictions) == 9
+    assert len(list((out / "fingerprints").glob("P01_T*.json"))) == 3
+    for row in acquisitions:
+        trio = [p for p in predictions if p["snapshot_id"] == row["snapshot_id"]]
+        assert sorted(p["model"] for p in trio) == ["complete", "spatial", "temporal"]
+        assert row["snapshot_id"].startswith(f"raspberrypi_os:coleta:P01:T{row['repetition']}:")
+    assert len({p["snapshot_id"] for p in predictions}) == 3
+
+
+def test_validate_opens_and_closes_the_port_per_repetition_and_loads_bundles_once(trained, monkeypatch):
+    loads = []
+    real = validate.load_bundle
+    monkeypatch.setattr(validate, "load_bundle", lambda path: loads.append(path) or real(path))
+    rig = _validate_point(monkeypatch)
+    assert rig.events == [("connect", "/dev/ttyUSB2"), ("snapshot",), ("close",)] * 3
+    assert len(loads) == 3  # um por modelo, nao um por predicao
+
+
+def test_validate_closes_the_port_when_the_snapshot_fails(trained, monkeypatch):
+    rig = _Rig(monkeypatch, [], snapshot_error=OSError("porta caiu"))
+    _run_point(_vargs(repetitions=2))
+    assert rig.events == [("connect", "/dev/ttyUSB2"), ("snapshot",), ("close",)] * 2
+    failures = _rows(_vdir(trained) / "failures.csv")
+    assert [(f["stage"], f["status"]) for f in failures] == [("snapshot", "error")] * 2
+    assert not (_vdir(trained) / "predictions.csv").exists()
+
+
+def test_validate_uses_the_canonical_reference_and_the_existing_geodesic_distance(trained, monkeypatch):
+    _validate_point(monkeypatch)
+    truth = reference.read_canonical(trained / "referencias_canonicas.csv")["P01"]
+    predictions = _rows(_vdir(trained) / "predictions.csv")
+    valid = [p for p in predictions if p["valid"] == "True"]
+    assert valid
+    for row in predictions:
+        assert (float(row["true_lat"]), float(row["true_lon"])) == (truth["lat"], truth["lon"])
+        assert row["true_point"] == "P01" and row["model_load_s"] and row["prediction_s"]
+    for row in valid:
+        expected = haversine_m(truth["lat"], truth["lon"], float(row["estimated_lat"]), float(row["estimated_lon"]))
+        assert float(row["error_m"]) == pytest.approx(expected) and float(row["error_m"]) > 0
+        assert row["estimated_x_m"] and row["estimated_y_m"] and row["n_observed_keys"] != ""
+
+
+@pytest.mark.parametrize("status,expected", [("complete", "valid"), ("partial", "valid")])
+def test_validate_applies_complete_and_partial_snapshots_normally(trained, monkeypatch, status, expected):
+    _validate_point(monkeypatch, snapshots=[_snapshot(status=status, started=f"t{i}") for i in range(3)])
+    assert {p["status"] for p in _rows(_vdir(trained) / "predictions.csv")} == {expected}
+    assert {a["snapshot_status"] for a in _rows(_vdir(trained) / "acquisitions.csv")} == {status}
+
+
+def test_validate_invalid_snapshot_is_saved_and_does_not_abort_the_next_repetitions(trained, monkeypatch):
+    invalid = _snapshot(status="invalid", cells=[], transport_error="MONI: OSError: caiu")
+    _validate_point(monkeypatch, snapshots=[_snapshot(started="t0"), invalid, _snapshot(started="t2")])
+    out = _vdir(trained)
+    assert len(_rows(out / "acquisitions.csv")) == 3 and len(list((out / "fingerprints").glob("*.json"))) == 3
+    second = [p for p in _rows(out / "predictions.csv") if p["repetition"] == "2"]
+    assert {p["status"] for p in second} == {"unavailable"} and {p["valid"] for p in second} == {"False"}
+    assert all(p["error_m"] == "" for p in second)
+    failures = _rows(out / "failures.csv")
+    assert [f["status"] for f in failures if f["stage"] == "snapshot"] == ["invalid"]
+    assert sorted(f["stage"] for f in failures if f["repetition"] == "2" and f["stage"] != "snapshot") == [
+        "complete", "spatial", "temporal"]
+    stored = json.loads((out / "fingerprints" / "P01_T2.json").read_text(encoding="utf-8"))
+    assert stored["status"] == "invalid" and stored["transport_error"] == "MONI: OSError: caiu"
+
+
+@pytest.mark.parametrize("cells,status", [
+    ([_cell(arfcn=9999, pci=99, cell_id="9", rsrp=-70.0)], "no_matching_radio_keys"),
+    ([_cell(rat="NR", arfcn=629952, pci=1, cell_id="7")], "technology_mismatch"),
+])
+def test_validate_records_unmatched_and_wrong_technology_estimates(trained, monkeypatch, cells, status):
+    _validate_point(monkeypatch, snapshots=[_snapshot(cells=cells, started=f"t{i}") for i in range(3)])
+    assert {p["status"] for p in _rows(_vdir(trained) / "predictions.csv")} == {status}
+    assert {f["status"] for f in _rows(_vdir(trained) / "failures.csv") if f["model"]} == {status}
+
+
+def test_validate_connection_failure_skips_only_that_repetition(trained, monkeypatch):
+    rig = _Rig(monkeypatch, [_snapshot(started="t0"), _snapshot(started="t2")], fail_connect={2})
+    _run_point(_vargs())
+    assert [a["repetition"] for a in _rows(_vdir(trained) / "acquisitions.csv")] == ["1", "3"]
+    assert len(rig.taken) == 2 and rig.connects == 3
+    assert [(f["repetition"], f["stage"]) for f in _rows(_vdir(trained) / "failures.csv")] == [("2", "connect")]
+
+
+def _failing_predictions_write(monkeypatch, fail_on_call):
+    real, state = validate.append_rows, {"calls": 0, "active": True}
+
+    def append(path, fields, rows):
+        if state["active"] and Path(path).name == "predictions.csv":
+            state["calls"] += 1
+            if state["calls"] == fail_on_call:
+                raise OSError("disco cheio")
+        return real(path, fields, rows)
+
+    monkeypatch.setattr(validate, "append_rows", append)
+    return state
+
+
+def test_validate_write_failure_preserves_what_was_written_and_can_be_resumed_with_force(trained, monkeypatch):
+    state = _failing_predictions_write(monkeypatch, 2)
+    rig = _Rig(monkeypatch, [_snapshot(started=f"t{i}") for i in range(8)])
+    with pytest.raises(validate.ValidationError, match="erro de escrita em T2"):
+        _run_point(_vargs())
+    out = _vdir(trained)
+    assert [a["repetition"] for a in _rows(out / "acquisitions.csv")] == ["1", "2"]  # T1 completo e utilizavel
+    assert len(_rows(out / "predictions.csv")) == 3 and (out / "fingerprints" / "P01_T1.json").is_file()
+    assert [f["stage"] for f in _rows(out / "failures.csv")] == ["write"]
+    assert not [t for t in threading.enumerate() if t.name == "process-sampler"]
+    with pytest.raises(validate.ValidationError, match="ja ha artefatos.*--force"):
+        _run_point(_vargs())
+    state["active"] = False
+    _Rig(monkeypatch, [_snapshot(started=f"u{i}") for i in range(3)])
+    _run_point(_vargs(force=True))
+    assert len(_rows(out / "acquisitions.csv")) == 3 and len(_rows(out / "predictions.csv")) == 9
+    assert len(rig.taken) == 2
+
+
+def test_validate_cancellation_creates_no_artifacts_and_touches_no_hardware(trained, monkeypatch):
+    rig = _Rig(monkeypatch, [])
+    with pytest.raises(validate.ValidationError, match="cancelada"):
+        _run_point(_vargs(), answer="nao")
+    assert not _vdir(trained).exists() and rig.events == []
+
+
+def test_validate_rejects_a_point_outside_the_campaign_and_unknown_models(trained, monkeypatch, capsys):
+    rig = _Rig(monkeypatch, [])
+    with pytest.raises(validate.ValidationError, match="P02 fora da campanha"):
+        _run_point(_vargs(point="P02"))
+    with pytest.raises(ValueError, match="--models invalido"):
+        _run_point(_vargs(models="spatial,deployed"))
+    assert validate._main(["point", "--campaign", "coleta", "--point", "P02"]) == 1
+    assert "fora da campanha" in capsys.readouterr().err and rig.events == [] and not _vdir(trained).exists()
+
+
+def test_validate_missing_model_fails_before_the_modem_is_opened(trained, monkeypatch):
+    (trained / "modelos" / "wknn_lte_temporal.json").unlink()
+    rig = _Rig(monkeypatch, [])
+    with pytest.raises(validate.ValidationError, match="modelo temporal nao treinado"):
+        _run_point(_vargs())
+    assert rig.events == [] and not _vdir(trained).exists()
+
+
+def test_validate_protects_existing_points_and_allows_the_next_point(trained, monkeypatch):
+    _validate_point(monkeypatch)
+    out = _vdir(trained)
+    before = _tree_bytes(out)
+    _Rig(monkeypatch, [])
+    with pytest.raises(validate.ValidationError, match="ja ha artefatos"):
+        _run_point(_vargs())
+    assert _tree_bytes(out) == before
+    _validate_point(monkeypatch, point="P03")
+    after = _tree_bytes(out)
+    for path, data in before.items():
+        if path.name in ("platform.json", "protocol.json") or "P01" in path.name:
+            assert after[path] == data, path
+    assert {r["point"] for r in _rows(out / "acquisitions.csv")} == {"P01", "P03"}
+
+
+def test_validate_force_replaces_only_the_artifacts_of_that_point(trained, monkeypatch):
+    _validate_point(monkeypatch)
+    _validate_point(monkeypatch, point="P03")
+    out = _vdir(trained)
+    before = _tree_bytes(out)
+    others = _without_validation(trained)
+    p03_metrics = [r for r in _rows(out / "system_metrics.csv") if r["point"] == "P03"]
+    _validate_point(monkeypatch, force=True, snapshots=[_snapshot(started=f"new{i}") for i in range(3)])
+    after = _tree_bytes(out)
+    assert _without_validation(trained) == others  # modelos, referencias, banco e logs intactos
+    for path, data in before.items():
+        if "P03" in path.name or path.name in ("platform.json", "protocol.json"):
+            assert after[path] == data, path
+    assert all("new" in r["started_at"] for r in _rows(out / "acquisitions.csv") if r["point"] == "P01")
+    assert [r for r in _rows(out / "system_metrics.csv") if r["point"] == "P03"] == p03_metrics
+    assert len([r for r in _rows(out / "acquisitions.csv") if r["point"] == "P01"]) == 3
+    assert len([r for r in _rows(out / "predictions.csv") if r["true_point"] == "P03"]) == 9
+
+
+def test_validate_records_protocol_with_rotating_prediction_order(trained, monkeypatch):
+    _validate_point(monkeypatch)
+    protocol = json.loads((_vdir(trained) / "protocol.json").read_text(encoding="utf-8"))
+    assert protocol["prediction_order"] == {"T1": ["complete", "temporal", "spatial"],
+                                            "T2": ["temporal", "spatial", "complete"],
+                                            "T3": ["spatial", "complete", "temporal"]}
+    assert (protocol["one_snapshot_per_repetition"], protocol["one_csurv_per_repetition"],
+            protocol["snapshot_shared_between_models"], protocol["true_reference_source"]) == (
+        True, True, True, "canonical_S1")
+    assert protocol["models"] == ["spatial", "temporal", "complete"] and protocol["repetitions"] == 3
+    assert protocol["points"] == list(FOUR_POINTS) and protocol["technology"] == "LTE"
+    assert [p["model"] for p in _rows(_vdir(trained) / "predictions.csv")][:3] == ["complete", "temporal", "spatial"]
+    with pytest.raises(validate.ValidationError, match="protocol.json incompativel.*repetitions"):
+        _Rig(monkeypatch, [])
+        _run_point(_vargs(point="P03", repetitions=2))
+    assert not [r for r in _rows(_vdir(trained) / "acquisitions.csv") if r["point"] == "P03"]
+
+
+@pytest.mark.parametrize("deploy,expected", [(None, None), ("complete", True), ("spatial", False)])
+def test_validate_platform_json_records_bundles_and_deployment(trained, monkeypatch, capsys, deploy, expected):
+    if deploy:
+        assert _deploy(capsys, model=deploy)[0] == 0
+    _validate_point(monkeypatch)
+    platform_data = json.loads((_vdir(trained) / "platform.json").read_text(encoding="utf-8"))
+    assert platform_data["platform_id"] == "raspberrypi_os" and platform_data["campaign"] == "coleta"
+    assert platform_data["deployed_matches_complete"] is expected
+    for name in ("spatial", "temporal", "complete"):
+        path = trained / "modelos" / f"wknn_lte_{name}.json"
+        assert platform_data["bundles"][name] == {
+            "path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "dataset_hashes": platform_data["bundles"][name]["dataset_hashes"]}
+    assert platform_data["tcc_location_conf"]["values"]["port"] == "/dev/ttyUSB2"
+    assert platform_data["collection_conf"]["sha256"] and platform_data["python"] and platform_data["kernel"]
+    assert not {"imei", "imsi", "iccid"} & set(json.dumps(platform_data).lower().replace('"', " ").split())
+
+
+def test_validate_platform_json_for_buildroot_and_incompatible_platform_is_not_overwritten(trained, monkeypatch):
+    location = config.load_config(config.SYSTEM_CONFIG)
+    config.save_config(config.SYSTEM_CONFIG, {**location, "system": "buildroot"}, force=True)
+    _validate_point(monkeypatch)
+    out = _vdir(trained)
+    assert json.loads((out / "platform.json").read_text(encoding="utf-8"))["platform_id"] == "buildroot"
+    assert _rows(out / "acquisitions.csv")[0]["platform"] == "buildroot"
+    config.save_config(config.SYSTEM_CONFIG, {**location, "system": "raspberrypi_os"}, force=True)
+    original = (out / "platform.json").read_bytes()
+    _Rig(monkeypatch, [])
+    with pytest.raises(validate.ValidationError, match="platform.json incompativel.*platform_id"):
+        _run_point(_vargs(point="P03"))
+    assert (out / "platform.json").read_bytes() == original
+
+
+@pytest.mark.parametrize("os_id,model", [("raspbian", "Raspberry Pi 3 Model B Rev 1.2"), ("buildroot", "BCM2835")])
+def test_platform_info_reads_simulated_proc_and_os_release(tmp_path, os_id, model):
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    (proc / "cpuinfo").write_text(f"processor\t: 0\nprocessor\t: 1\nModel\t\t: {model}\nHardware\t: BCM2835\n")
+    (proc / "meminfo").write_text("MemTotal:        948304 kB\nMemAvailable:    500000 kB\n")
+    release = tmp_path / "os-release"
+    release.write_text(f'ID={os_id}\nNAME="{os_id.title()}"\nVERSION_ID=12\n')
+    info = validate.platform_info(os_id, "coleta", {}, tmp_path / "c.conf", {"port": "/dev/ttyUSB2"},
+                                  tmp_path / "t.conf", "LTE", {}, None, proc_root=proc, os_release=release) \
+        if (tmp_path / "c.conf").write_text("a=1\n") and (tmp_path / "t.conf").write_text("b=2\n") else None
+    assert info["os_release"]["ID"] == os_id and info["cpu"]["cores"] == 2 and info["cpu"]["Model"] == model
+    assert info["memory_total_kb"] == 948304 and info["platform_id"] == os_id
+    assert info["deployed_matches_complete"] is None and info["architecture"]
+
+
+def test_platform_info_survives_missing_git_lscpu_vcgencmd_and_proc(tmp_path, monkeypatch):
+    def no_tools(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(manifest.subprocess, "run", no_tools)
+    (tmp_path / "c.conf").write_text("a=1\n")
+    (tmp_path / "t.conf").write_text("b=2\n")
+    info = validate.platform_info("buildroot", "coleta", {}, tmp_path / "c.conf", {}, tmp_path / "t.conf", "LTE", {},
+                                  None, proc_root=tmp_path / "sem-proc", os_release=tmp_path / "sem-os-release")
+    assert (info["git_commit"], info["cpu"], info["memory_total_kb"], info["os_release"]) == (None, None, None, None)
+
+
+def _simulated_system(tmp_path):
+    proc, sys_root = tmp_path / "proc", tmp_path / "sys"
+    (proc / "123").mkdir(parents=True)
+    (proc / "stat").write_text("cpu 100 0 20 80 0 0 0 0 0 0\n", encoding="ascii")
+    (proc / "loadavg").write_text("0.10 0.20 0.30 1/2 123\n", encoding="ascii")
+    (proc / "meminfo").write_text("MemAvailable: 4096 kB\n", encoding="ascii")
+    (proc / "123" / "stat").write_text("123 (python) R 0 0 0 0 0 0 0 0 0 0 50 10\n", encoding="ascii")
+    (proc / "123" / "status").write_text("VmRSS:\t100 kB\nVmHWM:\t200 kB\n", encoding="ascii")
+    thermal = sys_root / "class" / "thermal" / "thermal_zone0"
+    thermal.mkdir(parents=True)
+    (thermal / "temp").write_text("47000\n", encoding="ascii")
+    return proc, sys_root
+
+
+def test_process_sampler_uses_simulated_proc_and_sys_and_always_stops(tmp_path):
+    proc, sys_root = _simulated_system(tmp_path)
+    database = tmp_path / "campaign.db"
+    database.write_bytes(b"db")
+    out = tmp_path / "m" / "system_metrics.csv"
+    sampler = monitor.ProcessSampler(database, tmp_path, out, "validation", "P01", interval_s=0.01, pid=123,
+                                     proc_root=proc, sys_root=sys_root)
+    sampler.set(state="acquiring", session="T2")
+    with pytest.raises(RuntimeError, match="boom"):
+        with sampler:
+            raise RuntimeError("boom")
+    rows = _rows(out)
+    assert list(rows[0]) == list(monitor.FIELDS) and rows[0]["state"] == "acquiring" and rows[-1]["state"] == "failed"
+    first = rows[0]
+    assert (first["mode"], first["point"], first["session"]) == ("validation", "P01", "T2")
+    assert (first["rss_kb"], first["hwm_kb"], first["memory_available_kb"]) == ("100", "200", "4096")
+    assert (first["load_1m"], first["temperature_c"], first["database_bytes"]) == ("0.10", "47.0", "2")
+    assert first["disk_free_bytes"]
+    assert not sampler._thread.is_alive() and not [t for t in threading.enumerate() if t.name == "process-sampler"]
+    sampler.stop()  # idempotent
+    assert len(_rows(out)) == len(rows)
+
+
+def test_validate_metrics_follow_stabilizing_acquiring_predicting_completed(trained, monkeypatch):
+    _validate_point(monkeypatch, repetitions=1)
+    rows = _rows(_vdir(trained) / "system_metrics.csv")
+    assert {r["mode"] for r in rows} == {"validation"} and {r["point"] for r in rows} == {"P01"}
+    states = [r["state"] for r in rows]
+    assert states[0] in ("stabilizing", "acquiring", "predicting") and states[-1] == "completed"
+    assert {"completed"} <= set(states) <= {"stabilizing", "acquiring", "predicting", "completed"}
+    assert {r["session"] for r in rows} == {"T1"}
+
+
+def test_validate_sampler_stops_when_an_unexpected_error_aborts_the_point(trained, monkeypatch):
+    _Rig(monkeypatch, [])
+    monkeypatch.setattr(validate, "take_snapshot", lambda driver: (_ for _ in ()).throw(ValueError("inesperado")))
+    with pytest.raises(ValueError, match="inesperado"):
+        _run_point(_vargs())
+    assert not [t for t in threading.enumerate() if t.name == "process-sampler"]
+    assert _rows(_vdir(trained) / "system_metrics.csv")[-1]["state"] == "failed"
+
+
+def test_validate_fingerprint_allows_rebuilding_the_cells_without_the_modem(trained, monkeypatch):
+    from estimador.features import cells_from_observations
+    from estimador.methods.fingerprint import load_bundle
+
+    rig = _validate_point(monkeypatch, snapshots=[_snapshot(started=f"t{i}") for i in range(3)], repetitions=1)
+    stored = json.loads((_vdir(trained) / "fingerprints" / "P01_T1.json").read_text(encoding="utf-8"))
+    assert {"snapshot_id", "point", "repetition", "started_at", "status", "reasons", "access_mode", "serving",
+            "serving_rsrp_dbm", "serving_rsrq_db", "serving_sinr_db", "observations", "moni", "servinfo", "csurv",
+            "gnss", "timings_s", "anomalies", "transport_error"} <= set(stored)
+    cells = cells_from_observations([SimpleNamespace(**o) for o in stored["observations"]])
+    model = load_bundle(str(trained / "modelos" / "wknn_lte_complete.json"))
+    original = validate.estimate_from_snapshot(rig.taken[0], model=model)
+    assert model.predict(cells).lat == pytest.approx(original.lat)
+
+
+@pytest.fixture
+def validated(trained, monkeypatch):
+    for point in FOUR_POINTS:
+        _validate_point(monkeypatch, point=point)
+    return _vdir(trained)
+
+
+def _summarize(capsys, *extra):
+    code = validate._main(["summarize", "--campaign", "coleta", *extra])
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def test_validate_summarize_consolidates_without_touching_hardware(validated, trained, monkeypatch, capsys):
+    monkeypatch.setattr(validate, "FN990Driver", lambda: pytest.fail("summarize nao acessa hardware"))
+    others = _without_validation(trained)
+    code, out, err = _summarize(capsys)
+    assert code == 0, err
+    assert "Validacao: 4 pontos, 12 snapshots, 36 predicoes" in out and "Pronto para comparacao com Buildroot: sim" in out
+    summary = json.loads((validated / "validation_summary.json").read_text(encoding="utf-8"))
+    assert (summary["snapshots"], summary["predictions"], summary["problems"], summary["ready_for_comparison"]) == (
+        12, 36, [], True)
+    assert set(summary["by_model"]) == {"spatial", "temporal", "complete"}
+    assert all(item["predictions"] == 12 and item["coverage"] == 1.0 for item in summary["by_model"].values())
+    assert summary["acquisition"]["status_counts"] == {"complete": 12} and summary["acquisition"]["total_s"]["max"] == 2.6
+    assert summary["acquisition"]["n_lte_observations"]["total"] == 36
+    assert summary["system"]["samples"] > 0 and "cpu_total" in summary["system"]
+    by_model = {r["model"]: r for r in _rows(validated / "summary_by_model.csv")}
+    assert set(by_model) == {"spatial", "temporal", "complete"} and by_model["complete"]["predictions"] == "12"
+    by_point = _rows(validated / "summary_by_point.csv")
+    assert len(by_point) == 12 and {r["repetitions"] for r in by_point} == {"3"}
+    assert _without_validation(trained) == others
+
+
+def test_validate_summarize_detects_a_missing_point(trained, monkeypatch, capsys):
+    for point in ("P01", "P03", "P05"):
+        _validate_point(monkeypatch, point=point)
+    code, out, err = _summarize(capsys)
+    assert code == 1 and "P08/T1: aquisicao ausente" in err and "Pronto para comparacao com Buildroot: nao" in out
+
+
+def test_validate_summarize_detects_a_missing_repetition(trained, monkeypatch, capsys):
+    _Rig(monkeypatch, [_snapshot(started=f"t{i}") for i in range(2)], fail_connect={2})
+    _run_point(_vargs())
+    for point in ("P03", "P05", "P08"):
+        _validate_point(monkeypatch, point=point)
+    code, out, err = _summarize(capsys)
+    assert code == 1 and "P01/T2: aquisicao ausente" in err and "P03/T" not in err
+
+
+def test_validate_summarize_detects_duplicates_and_broken_files(validated, capsys):
+    rows = _rows(validated / "acquisitions.csv")
+    validate.append_rows(validated / "acquisitions.csv", validate.ACQUISITION_FIELDS, [rows[0]])
+    predictions = _rows(validated / "predictions.csv")
+    validate.append_rows(validated / "predictions.csv", validate.PREDICTION_FIELDS, [predictions[0]])
+    (validated / "fingerprints" / "P03_T2.json").write_text("{nao e json", encoding="utf-8")
+    code, out, err = _summarize(capsys)
+    assert code == 1
+    assert "aquisicao duplicada" in err and "snapshot_id duplicado" in err and "predicao duplicada do modelo" in err
+    assert "P03_T2.json: ausente ou invalido" in err
+
+
+def test_validate_summarize_detects_a_snapshot_not_shared_by_all_models(validated, capsys):
+    rows = [r for r in _rows(validated / "predictions.csv") if not (r["true_point"] == "P01" and r["repetition"] == "1"
+                                                                     and r["model"] == "spatial")]
+    validate.rewrite_rows(validated / "predictions.csv", validate.PREDICTION_FIELDS, rows)
+    code, out, err = _summarize(capsys)
+    assert code == 1 and "modelos ['complete', 'temporal'] diferem" in err
+
+
+def test_validate_summarize_handles_eight_points_and_three_repetitions(tmp_path, monkeypatch, capsys):
+    results, _ = _trainable_collection(tmp_path, monkeypatch, prepare.VALID_POINTS)
+    assert _wknn(capsys, "train", "--campaign", "coleta")[0] == 0
+    for point in prepare.VALID_POINTS:
+        _validate_point(monkeypatch, point=point)
+    code, out, err = _summarize(capsys)
+    assert code == 0, err
+    assert "Validacao: 8 pontos, 24 snapshots, 72 predicoes" in out
+    summary = json.loads((_vdir(results) / "validation_summary.json").read_text(encoding="utf-8"))
+    assert (summary["expected_snapshots"], summary["expected_predictions"]) == (24, 72)
+
+
+def _model_rows(errors, invalid=1):
+    rows = [{"valid": "True", "error_m": str(e), "status": "valid", "prediction_s": "0.002",
+             "n_observed_keys": "3", "n_ignored_keys": "1"} for e in errors]
+    rows += [{"valid": "False", "error_m": "", "status": "unavailable", "prediction_s": "0.004",
+              "n_observed_keys": "", "n_ignored_keys": ""} for _ in range(invalid)]
+    return rows
+
+
+def test_validate_summary_statistics():
+    summary = validate.model_summary(_model_rows([10.0, 20.0, 30.0, 40.0]))
+    assert (summary["predictions"], summary["valid"], summary["failures"], summary["coverage"]) == (5, 4, 1, 0.8)
+    assert summary["status_counts"] == {"unavailable": 1, "valid": 4}
+    assert (summary["mean_m"], summary["median_m"], summary["max_m"]) == (25.0, 25.0, 40.0)
+    assert summary["rmse_m"] == pytest.approx(750 ** 0.5)
+    assert (summary["p90_m"], summary["p95_m"]) == (pytest.approx(37.0), pytest.approx(38.5))
+    assert summary["mean_prediction_ms"] == pytest.approx((4 * 2 + 4) / 5)
+    assert summary["p95_prediction_ms"] == pytest.approx(3.6)
+    assert (summary["mean_observed_keys"], summary["mean_ignored_keys"]) == (3.0, 1.0)
+    empty = validate.model_summary(_model_rows([], invalid=2))
+    assert (empty["coverage"], empty["mean_m"], empty["rmse_m"], empty["p95_m"]) == (0.0, None, None, None)
+    assert validate.point_summary([])["coverage"] is None
+
+
+def test_validate_does_not_change_position_training_or_bundles(trained, monkeypatch, capsys):
+    bundles = {path: data for path, data in _tree_bytes(trained / "modelos").items()}
+    others = _without_validation(trained)
+    _validate_point(monkeypatch)
+    assert _without_validation(trained) == others
+    assert {path: data for path, data in _tree_bytes(trained / "modelos").items()} == bundles
+    _fake_live(monkeypatch)
+    code, out, err = _wknn_position(capsys, "--campaign", "coleta", "--model", "complete", "--json")
+    assert code == 0, err and json.loads(out)["method"] == "wknn"
+    assert _without_validation(trained) == others

@@ -372,6 +372,31 @@ pelo menos 2 grupos de treino em cada fold. Abaixo disso, o treino encerra com
 divisão aleatória por linha. O mínimo não garante resultado estável: com poucos grupos, o
 relatório avisa que a variância é alta.
 
+### Validação prática dos modelos WKNN (desenvolvedor)
+
+`campaign_tools.validate` mede, num ponto real, os três modelos com **o mesmo snapshot**: em cada
+repetição há um único `take_snapshot` (um `#CSURV`), e esse objeto é aplicado a spatial, temporal e
+complete por `estimador.live.estimate_from_snapshot`, com métricas de CPU/memória do próprio processo
+(`campaign_tools.monitor.ProcessSampler`, só `/proc` e `/sys`; sem GNU time, psutil nem shell). Sem
+porta, banco, caminhos ou variáveis: tudo vem de `tcc-location.conf` e `collection.conf`. O usuário
+final continua usando `python -m campaign_tools.position`; o runtime é validado em etapa separada.
+
+```bash
+# Raspberry Pi OS (no Buildroot, python3 -m): um comando por ponto da campanha
+python -m campaign_tools.validate point --campaign casa-8-pontos-rpios --point P01
+...
+python -m campaign_tools.validate summarize --campaign casa-8-pontos-rpios
+```
+
+Padrão: 3 repetições por ponto (8 pontos = 24 snapshots e 72 predições), 60 s de estabilização antes
+da primeira, 10 s entre repetições, sem nova estabilização. A verdade é a referência canônica
+(`referencias_canonicas.csv`), nunca o GNSS do snapshot. Artefatos em
+`<results>/avaliacoes/validation/`: `platform.json`, `protocol.json`, `fingerprints/<ponto>_T<n>.json`,
+`predictions.csv`, `acquisitions.csv`, `system_metrics.csv`, `failures.csv`, `summary_by_model.csv`,
+`summary_by_point.csv` e `validation_summary.json`, com o mesmo formato nas duas plataformas. Um ponto
+já validado só é refeito com `--force` (substitui só os artefatos daquele ponto). O `summarize` não
+acessa o hardware e indica se a validação está pronta para comparação com a outra plataforma.
+
 ---
 
 ## 6. Como interpretar falhas e cobertura

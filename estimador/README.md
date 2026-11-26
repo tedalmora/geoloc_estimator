@@ -191,3 +191,36 @@ e não é medida de erro nem de precisão. O `live.py` não grava estimativas; o
 Fontes de cada decisão: `planejamento/RASTREABILIDADE_CODIGO.md`. O `planejamento/knn_explicado.md`
 explica KNN/WKNN do zero, mas é documento histórico (arquivos e comandos do desenho anterior).
 
+## Validação prática comparável (`campaign_tools.validate`)
+
+Ferramenta de engenharia (não do usuário final, que usa `campaign_tools.position`). Para cada ponto
+da campanha faz N repetições (padrão 3); em cada uma tira **um** snapshot (um `#CSURV`) e aplica esse
+mesmo objeto aos bundles spatial, temporal e complete com `estimate_from_snapshot` (nunca
+`run_estimate`, que leria o modem de novo). Os bundles são carregados e validados uma vez, antes de
+abrir a porta; o deployed não entra na comparação (só é conferido e registrado em `platform.json`).
+
+```bash
+python -m campaign_tools.validate point --campaign casa-8-pontos-rpios --point P01   # um por ponto
+python -m campaign_tools.validate summarize --campaign casa-8-pontos-rpios            # sem hardware
+```
+
+- Opções de `point`: `--repetitions` (3), `--models` (spatial,temporal,complete), `--stabilization-s`
+  (60), `--between-repetitions-s` (10), `--metrics-interval-s` (1), `--output`, `--force` (refaz só o
+  ponto). O ponto precisa estar no `collection.conf`; confirmação `OK` antes de começar.
+- Verdade: `referencias_canonicas.csv`; erro = `reference.distance_m` (haversine do `geometry`).
+- Ordem das predições alternada por repetição (T1 complete,temporal,spatial; T2 temporal,spatial,
+  complete; T3 spatial,complete,temporal) e registrada em `protocol.json`.
+- Artefatos (`<results>/avaliacoes/validation/`): `platform.json`, `protocol.json`,
+  `fingerprints/<ponto>_T<n>.json` (snapshot completo, suficiente para recalcular sem o modem),
+  `predictions.csv` (uma linha por modelo e snapshot, todos com o mesmo `snapshot_id`),
+  `acquisitions.csv`, `system_metrics.csv` (mesmos campos do `monitor`, `mode=validation`,
+  `session=T<n>`, `state=stabilizing|acquiring|predicting|completed|failed`), `failures.csv` e os
+  resumos `summary_by_model.csv`, `summary_by_point.csv`, `validation_summary.json`.
+- Métricas de sistema pelo `monitor.ProcessSampler` (thread no próprio processo; só `/proc` e `/sys`,
+  sem psutil, GNU time, bash ou `vcgencmd`); campos ausentes no Buildroot ficam vazios.
+- Snapshot `invalid`: fingerprint e aquisição são gravados e os três modelos dão `unavailable`;
+  `partial` segue a regra do `estimate_from_snapshot`. Falha de porta registra a repetição e tenta de
+  novo na seguinte. O `summarize` aponta pontos, repetições, modelos ou `snapshot_id` ausentes ou
+  duplicados e arquivos ilegíveis (saída 1) e informa se está pronto para comparar com a outra
+  plataforma.
+

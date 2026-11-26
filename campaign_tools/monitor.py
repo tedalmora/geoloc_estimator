@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -239,6 +240,91 @@ def run_collection(db_path, data_dir, output, log_path, point, session, command,
         raise
     finally:
         metrics_stream.close()
+
+
+def _clock_ticks():
+    sysconf = getattr(os, "sysconf", None)
+    try:
+        return sysconf("SC_CLK_TCK") if sysconf else 100
+    except (OSError, ValueError):
+        return 100
+
+
+class ProcessSampler:
+    """Samples the current process (and the system) in a background thread into a metrics CSV.
+
+    Reuses sample_resources/_metric_row, so rows match the other monitor modes. State and session
+    are set by the caller; stop() always joins the thread and writes one final sample.
+    """
+
+    def __init__(self, db_path, data_dir, output, mode, point, interval_s=1.0, pid=None,
+                 proc_root="/proc", sys_root="/sys"):
+        if not math.isfinite(interval_s) or interval_s <= 0:
+            raise ValueError("intervalo precisa ser positivo")
+        self._args = (db_path, data_dir)
+        self._kwargs = {"pid": os.getpid() if pid is None else pid, "mode": mode, "point": point,
+                        "proc_root": proc_root, "sys_root": sys_root}
+        self._output = output
+        self._interval = interval_s
+        self._state = ""
+        self._session = ""
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._thread = None
+        self._stream = self._writer = None
+        self._previous = (None, None, None)
+        self._clock_ticks = _clock_ticks()
+        self.error = None
+
+    def set(self, state=None, session=None):
+        with self._lock:
+            if state is not None:
+                self._state = state
+            if session is not None:
+                self._session = session
+
+    def _sample(self):
+        with self._lock:
+            sample = sample_resources(*self._args, state=self._state, session=self._session, **self._kwargs)
+            row, *self._previous = _metric_row(sample, *self._previous, self._clock_ticks)
+            self._writer.writerow(row)
+            self._stream.flush()
+
+    def _run(self):
+        try:
+            while not self._stop.is_set():
+                self._sample()
+                self._stop.wait(self._interval)
+        except (OSError, ValueError) as exc:  # a metrics failure must not break the benchmark
+            self.error = exc
+
+    def start(self):
+        if self._thread is not None:
+            raise RuntimeError("sampler ja iniciado")
+        self._stream, self._writer = _open_metrics(self._output)
+        self._thread = threading.Thread(target=self._run, name="process-sampler", daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self, final_state="completed"):
+        if self._thread is None or self._stream is None:
+            return
+        self._stop.set()
+        self._thread.join()
+        try:
+            if self.error is None:
+                self.set(state=final_state)
+                self._sample()
+        finally:
+            self._stream.close()
+            self._stream = None
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.stop("failed" if exc_type else "completed")
+        return False
 
 
 def _main(argv=None):
