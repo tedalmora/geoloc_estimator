@@ -310,7 +310,7 @@ def _train_complete(dataset, policy: CellFilterPolicy, db_path: str, out_path: s
 
 def train(db_path: str, technology: str, protocol: str, out_path: str, campaign_plmn: Optional[str] = None,
           grid: Grid = Grid(), test_fraction: float = 0.2, n_folds: int = 5, seed: int = 42,
-          include_other_plmn: bool = False, include_unknown_plmn: bool = True, include_forbidden: bool = False,
+          include_other_plmn: bool = True, include_unknown_plmn: bool = True, include_forbidden: bool = False,
           allow_single_gnss: bool = False) -> Tuple[dict, dict]:
     """Treina, avalia no teste e salva o bundle. Devolve (bundle, relatório). `complete` não tem teste."""
     if technology not in TECHNOLOGIES or protocol not in TRAIN_PROTOCOLS:
@@ -445,7 +445,8 @@ def main(argv=None) -> None:
     parser.add_argument("--test-fraction", dest="test_fraction", type=float, default=0.2)
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--include-other-plmn", dest="include_other_plmn", action="store_true")
+    parser.add_argument("--exclude-other-plmn", dest="include_other_plmn", action="store_false",
+                        help="restringe as features às células do PLMN da campanha (padrão: usa todas)")
     parser.add_argument("--exclude-unknown-plmn", dest="include_unknown_plmn", action="store_false")
     parser.add_argument("--include-forbidden", dest="include_forbidden", action="store_true")
     parser.add_argument("--allow-single-gnss", dest="allow_single_gnss", action="store_true",

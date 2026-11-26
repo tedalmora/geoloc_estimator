@@ -2,17 +2,17 @@
 
 Política padrão de células (gravada no bundle e no relatório do treino):
 - RAT diferente da tecnologia do modelo: fora;
-- PLMN igual ao da campanha: dentro;
-- PLMN conhecido e diferente: fora (`include_other_plmn` inclui);
+- qualquer PLMN conhecido: dentro, inclusive de outra operadora (o fingerprint usa só o RSRP de um
+  identificador estável, radio_key; `include_other_plmn=False` restringe ao PLMN da campanha);
 - PLMN ausente (registro curto do #CSURV): dentro, marcado como PLMN não confirmado
   (`include_unknown_plmn=False` exclui). Nenhum PLMN é atribuído ao registro;
 - CELL_FORBIDDEN: guardada no banco, mas fora das features (`include_forbidden` inclui);
 - RSRP ausente (inclusive o 0 "não coletado" do #CSURV): a célula conta como não observada.
 A mesma radio_key repetida numa leitura vira a média dos RSRP.
 
-O vocabulário (ordem das colunas) é montado só com amostras de treino. Uma radio_key que
-apareça no treino com PLMN conhecido de outra operadora fica fora do vocabulário, mesmo nos
-registros curtos. Timing Advance não faz parte das features.
+O vocabulário (ordem das colunas) é montado só com amostras de treino. Com `include_other_plmn=False`,
+uma radio_key que apareça no treino com PLMN conhecido de outra operadora fica fora do vocabulário,
+mesmo nos registros curtos. Timing Advance não faz parte das features.
 """
 import math
 import re
@@ -43,7 +43,7 @@ class MissingValueError(ValueError):
 class CellFilterPolicy:
     technology: str
     campaign_plmn: str
-    include_other_plmn: bool = False
+    include_other_plmn: bool = True
     include_unknown_plmn: bool = True
     include_forbidden: bool = False
 

@@ -134,8 +134,11 @@ python -m estimador.live wknn --port /dev/ttyUSB2 --model modelos/wknn_lte_spati
 python -m estimador.live cell-id --port /dev/ttyUSB2 --registry estimador/network_registry.json
 ```
 
-Opções do treino: `python -m estimador.train --help` (grade, PLMN da campanha, inclusão de
-outras operadoras, de PLMN não confirmado e de `CELL_FORBIDDEN`, semente e folds). O
+Opções do treino: `python -m estimador.train --help` (grade, PLMN da campanha, `--exclude-other-plmn`,
+`--exclude-unknown-plmn`, `--include-forbidden`, semente e folds). Por padrão o WKNN usa células de
+qualquer operadora: o fingerprint depende só do RSRP de um identificador estável (`radio_key`), e o
+filtro por PLMN reduzia a cobertura (numa campanha real, 38% das leituras ficaram sem nenhuma célula
+conhecida; sem o filtro, 96%). O
 `compare` recusa o banco se as medições de teste do bundle sumiram ou mudaram
 (`test_samples_missing`, `test_samples_changed`). Métricas: média, mediana (CE50), RMSE, p90,
 p95, máximo e CDF, sempre com a cobertura.

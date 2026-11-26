@@ -32,6 +32,7 @@ from estimador.methods.fingerprint import BundleError, WknnModel, load_bundle, s
 from software_version import software_version
 
 POLITICA = CellFilterPolicy("LTE", CAMPAIGN_PLMN)
+RESTRITA = CellFilterPolicy("LTE", CAMPAIGN_PLMN, include_other_plmn=False)
 SEMENTE_P6_NO_TESTE = 8  # com esta semente, o sorteio spatial põe P6 (único ponto que vê LOCAL_KEY) no teste
 
 
@@ -77,7 +78,8 @@ def test_enu_ida_e_volta_e_deslocamentos_conhecidos():
 # --------------------------------------------------------------------------- política e features
 def test_politica_padrao_de_plmn_e_status():
     assert POLITICA.accepts(cel("LTE:1:1"))
-    assert not POLITICA.accepts(cel("LTE:1:2", plmn="72405"))
+    assert POLITICA.accepts(cel("LTE:1:2", plmn="72405"))  # outra operadora entra por padrao
+    assert not RESTRITA.accepts(cel("LTE:1:2", plmn="72405"))
     assert POLITICA.accepts(cel("LTE:1:3", plmn=None))
     assert not POLITICA.accepts(cel("LTE:1:4", status="CELL_FORBIDDEN"))
     assert not POLITICA.accepts(cel("NR:1:5"))
@@ -88,12 +90,22 @@ def test_politica_padrao_de_plmn_e_status():
     assert CellFilterPolicy.from_dict(ampla.to_dict()) == ampla
 
 
-def test_vocabulario_marca_plmn_nao_confirmado_e_exclui_outra_operadora():
+def test_vocabulario_usa_todas_as_operadoras_por_padrao():
+    amostras = [
+        Amostra(cel("LTE:1:1"), cel("LTE:1:3", plmn=None), cel("LTE:1:7", plmn="72405")),
+        Amostra(cel("LTE:1:7", plmn=None)),
+    ]
+    chaves, status = build_vocabulary(amostras, POLITICA)
+    assert chaves == ["LTE:1:1", "LTE:1:3", "LTE:1:7"]
+    assert status["LTE:1:7"] == "other" and status["LTE:1:1"] == PLMN_CAMPAIGN
+
+
+def test_vocabulario_restrito_marca_plmn_nao_confirmado_e_exclui_outra_operadora():
     amostras = [
         Amostra(cel("LTE:1:1"), cel("LTE:1:3", plmn=None), cel("LTE:1:7", plmn="72405")),
         Amostra(cel("LTE:1:7", plmn=None)),  # mesmo radio_key em registro curto: segue fora
     ]
-    chaves, status = build_vocabulary(amostras, POLITICA)
+    chaves, status = build_vocabulary(amostras, RESTRITA)
     assert chaves == ["LTE:1:1", "LTE:1:3"]
     assert status == {"LTE:1:1": PLMN_CAMPAIGN, "LTE:1:3": PLMN_UNCONFIRMED}
 
@@ -169,7 +181,8 @@ def test_treino_spatial_gera_bundle_completo_e_valido(treino_spatial, radiomapa)
     assert bundle["training_groups"]["group_column"] == "reference_point_id"
     assert bundle["cell_filter_policy"] == relatorio["cell_filter_policy"] == POLITICA.to_dict()
     assert bundle["missing_value"] < bundle["missing_value_validation"]["observed_min_dbm"]
-    assert "LTE:9410:21" not in bundle["cell_keys"] and "LTE:100:87" not in bundle["cell_keys"]  # outra operadora, proibida
+    assert "LTE:9410:21" in bundle["cell_keys"]  # outra operadora entra (include_other_plmn padrao)
+    assert "LTE:100:87" not in bundle["cell_keys"]  # CELL_FORBIDDEN segue fora
     assert bundle["cell_key_plmn_status"]["LTE:3375:99"] == PLMN_UNCONFIRMED
     assert "fingerprints" not in relatorio and relatorio["validation"]["ranking"]
     with open(saida, encoding="utf-8") as f:
