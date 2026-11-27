@@ -486,7 +486,13 @@ def run_point(args, input_fn=input, sleep=time.sleep, snapshot_fn=None):
         final_state = "completed"
     finally:
         sampler.stop(final_state)
+    if not produced:
+        raise ValidationError(f"{point}: nenhum snapshot adquirido (porta {location['port']}); "
+                              f"veja {out / 'failures.csv'}")
     summary_text(point, produced, out, collection)
+    if len(produced) < args.repetitions:
+        print(f"\nAVISO: {args.repetitions - len(produced)} de {args.repetitions} repeticoes sem snapshot; "
+              f"veja {out / 'failures.csv'}")
     return produced
 
 

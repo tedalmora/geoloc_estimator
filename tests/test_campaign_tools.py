@@ -1716,7 +1716,8 @@ def test_validate_opens_and_closes_the_port_per_repetition_and_loads_bundles_onc
 
 def test_validate_closes_the_port_when_the_snapshot_fails(trained, monkeypatch):
     rig = _Rig(monkeypatch, [], snapshot_error=OSError("porta caiu"))
-    _run_point(_vargs(repetitions=2))
+    with pytest.raises(validate.ValidationError, match="nenhum snapshot adquirido"):
+        _run_point(_vargs(repetitions=2))
     assert rig.events == [("connect", "/dev/ttyUSB2"), ("snapshot",), ("close",)] * 2
     failures = _rows(_vdir(trained) / "failures.csv")
     assert [(f["stage"], f["status"]) for f in failures] == [("snapshot", "error")] * 2
@@ -1777,6 +1778,13 @@ def test_validate_connection_failure_skips_only_that_repetition(trained, monkeyp
     assert [a["repetition"] for a in _rows(_vdir(trained) / "acquisitions.csv")] == ["1", "3"]
     assert len(rig.taken) == 2 and rig.connects == 3
     assert [(f["repetition"], f["stage"]) for f in _rows(_vdir(trained) / "failures.csv")] == [("2", "connect")]
+
+
+def test_validate_fails_when_no_snapshot_could_be_acquired(trained, monkeypatch):
+    _Rig(monkeypatch, [], fail_connect={1, 2, 3})
+    with pytest.raises(validate.ValidationError, match="nenhum snapshot adquirido"):
+        _run_point(_vargs())
+    assert len(_rows(_vdir(trained) / "failures.csv")) == 3
 
 
 def _failing_predictions_write(monkeypatch, fail_on_call):
