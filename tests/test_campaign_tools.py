@@ -1191,6 +1191,7 @@ def test_wknn_train_calls_training_and_evaluation_in_order(tmp_path, monkeypatch
     train_argv = calls[0][1]
     assert train_argv[train_argv.index("--db") + 1] == str(db_path)
     assert train_argv[train_argv.index("--campaign-plmn") + 1] == "72406"
+    assert train_argv[train_argv.index("--k") + 1] == "2" and train_argv[train_argv.index("--metrics") + 1] == "L1"
     assert train_argv[train_argv.index("--report") + 1] == str(results / "modelos" / "treino_lte_spatial.json")
     evaluate_argv = calls[1][1]
     assert evaluate_argv[evaluate_argv.index("--json-out") + 1] == str(results / "avaliacoes" / "spatial" / "avaliacao.json")
