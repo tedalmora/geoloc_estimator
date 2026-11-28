@@ -415,7 +415,8 @@ def _main(argv=None):
     parser.add_argument("--system", choices=config.SYSTEMS)
     parser.add_argument("--environment", choices=config.ENVIRONMENTS)
     parser.add_argument("--point", choices=prepare.VALID_POINTS, required=True)
-    parser.add_argument("--session", choices=("S1", "S2"), required=True)
+    parser.add_argument("--session", choices=("S1", "S2", "S3"), required=True,
+                        help="S3 e opcional (sessao extra em outro horario; se usada, todos os pontos precisam dela)")
     parser.add_argument("--db", help="obrigatorio sem --campaign")
     parser.add_argument("--port")
     parser.add_argument("--plmn")

@@ -361,6 +361,23 @@ def test_selecao_temporal_nao_usa_nenhuma_medicao_s2(radiomapa, tmp_path, monkey
     assert depois["validation"]["test_metrics"] != antes["validation"]["test_metrics"]
 
 
+def test_temporal_ignora_sessao_s3_e_o_complete_a_usa(radiomapa, tmp_path):
+    banco = tmp_path / "s3.db"
+    shutil.copy(radiomapa, banco)
+    rotular_sessoes(banco, set(range(1, 10)))
+    conn = sqlite3.connect(str(banco))
+    conn.execute("UPDATE sessions SET notes = 'campaign_tools:raspberrypi_os:P18:S3' WHERE session_id = 18")
+    conn.commit()
+    conn.close()
+    amostras, _ = tr.eligible_samples(load_dataset(str(banco)).samples, "temporal", POLITICA)
+    assert {s.session_label for s in amostras if s.session_id == 18} == {"S3"}
+    divisao = make_group_split(amostras, "temporal")
+    assert divisao.selection_groups == tuple(range(10, 18)) and divisao.test_groups == tuple(range(1, 10))
+    complete, _ = tr.train(str(banco), "LTE", "complete", str(tmp_path / "c.json"), grid=tr.Grid(k=(1, 3)))
+    sessoes = {s.measurement_id: s.session_id for s in amostras}
+    assert 18 in {sessoes[i] for i in complete["fingerprints"]["measurement_id"]}
+
+
 def test_temporal_com_sessao_sem_rotulo_claro_gera_erro(radiomapa, tmp_path):
     banco = tmp_path / "parcial.db"
     shutil.copy(radiomapa, banco)

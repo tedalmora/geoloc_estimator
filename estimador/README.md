@@ -62,7 +62,8 @@ do teste, da seleção e de cada fold (`validation.subsets`).
 No `temporal`, se as sessões têm o rótulo `campaign_tools:<sistema>:<ponto>:S1|S2` nas `notes`, todas as
 S1 formam a seleção (hiperparâmetros por validação só em S1) e todas as S2 o teste independente
 (`temporal_selection=S1`, `temporal_test=S2` no bundle); `--test-fraction`, o horário e a ordem dos
-`session_id` não participam, e sessão sem rótulo é erro. Bancos antigos sem nenhum rótulo mantêm a
+`session_id` não participam, e sessão sem rótulo é erro. Sessões `S3` (opcionais) são ignoradas no
+temporal e entram no spatial e no complete. Bancos antigos sem nenhum rótulo mantêm a
 divisão cronológica. Um ponto do teste que não aparece no treino é extrapolação espacial, não
 generalização temporal: as métricas saem separadas em `known_points` e `new_points`
 (`test_metrics_by_point_type`), com aviso. Se a referência de um ponto do teste for a mediana

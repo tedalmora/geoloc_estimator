@@ -102,7 +102,7 @@ class Sample:
     cells: Tuple[CsurvCell, ...]
     reference: ReferencePosition
     environment: Optional[str] = None
-    session_label: Optional[str] = None  # S1 ou S2, de sessions.notes (campaign_tools:<sistema>:<ponto>:<S1|S2>)
+    session_label: Optional[str] = None  # S1, S2 ou S3, de sessions.notes (campaign_tools:<sistema>:<ponto>:<S1|S2|S3>)
 
     def group(self, protocol: str) -> Optional[int]:
         return self.reference_point_id if protocol == PROTOCOL_SPATIAL else self.session_id
@@ -156,12 +156,12 @@ class Dataset:
                 "allow_single_gnss": self.allow_single_gnss, "min_gnss_for_median": self.min_gnss_for_median}
 
 
-_SESSION_LABEL = re.compile(r"campaign_tools:[^:]+:[^:]+:(S1|S2)")
+_SESSION_LABEL = re.compile(r"campaign_tools:[^:]+:[^:]+:(S1|S2|S3)")
 SESSION_SELECTION, SESSION_TEST = "S1", "S2"
 
 
 def session_label(notes: Optional[str]) -> Optional[str]:
-    """S1 ou S2 a partir das notes gravadas pelo campaign_tools.visit; None se não houver rótulo claro."""
+    """S1, S2 ou S3 a partir das notes gravadas pelo campaign_tools.visit; None se não houver rótulo claro."""
     match = _SESSION_LABEL.fullmatch((notes or "").strip())
     return match.group(1) if match else None
 

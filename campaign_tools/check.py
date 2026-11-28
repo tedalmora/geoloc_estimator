@@ -12,6 +12,7 @@ from . import config, prepare
 from .reference import read_canonical
 
 SESSIONS = ("S1", "S2")
+OPTIONAL_SESSION = "S3"  # exigida em todos os pontos assim que aparecer em um
 MEASUREMENTS_PER_SESSION = 3
 SNAPSHOT_STATUSES = ("complete", "partial", "invalid")
 NOTES_PREFIX = "campaign_tools"
@@ -99,6 +100,7 @@ def check_collection(collection):
     warnings, invalid_snapshots = [], []
     totals = Counter()
     found_sessions = 0
+    sessions = SESSIONS
     data = _read_database(collection["db"], db_errors)
     if data is not None:
         missing_points = [point for point in points if point not in data["points"]]
@@ -110,12 +112,15 @@ def check_collection(collection):
             counts = data["snapshots"].get(session_id, Counter())
             totals.update(counts)
             label = _visit_label(notes)
-            if label is None or label[0] != name or label[0] not in points or label[1] not in SESSIONS:
+            if (label is None or label[0] != name or label[0] not in points
+                    or label[1] not in SESSIONS + (OPTIONAL_SESSION,)):
                 acquisition_errors.append(f"sessao {session_id} inesperada ({name}, {notes!r})")
                 continue
             visits.setdefault(label, []).append((session_id, status, counts))
+        if any(label[1] == OPTIONAL_SESSION for label in visits):
+            sessions = SESSIONS + (OPTIONAL_SESSION,)
         for point in points:
-            for session in SESSIONS:
+            for session in sessions:
                 entries = visits.get((point, session), [])
                 if not entries:
                     acquisition_errors.append(f"{point}/{session}: sessao ausente")
@@ -147,7 +152,7 @@ def check_collection(collection):
         if extra:
             reference_errors.append(f"referencias canonicas com pontos fora da coleta: {', '.join(extra)}")
     for point in points:
-        for session in SESSIONS:
+        for session in sessions:
             fixes = results / "referencias" / f"{point}_{session}_fixes.csv"
             if not fixes.is_file():
                 reference_errors.append(f"fixes ausentes: {fixes}")
@@ -160,8 +165,8 @@ def check_collection(collection):
 
     return {
         "name": collection["name"], "points": points,
-        "expected_sessions": len(points) * len(SESSIONS), "found_sessions": found_sessions,
-        "expected_measurements": len(points) * len(SESSIONS) * MEASUREMENTS_PER_SESSION,
+        "expected_sessions": len(points) * len(sessions), "found_sessions": found_sessions,
+        "expected_measurements": len(points) * len(sessions) * MEASUREMENTS_PER_SESSION,
         "found_measurements": sum(totals.values()), "snapshots": totals,
         "db_errors": db_errors, "acquisition_errors": acquisition_errors,
         "reference_errors": reference_errors, "evidence_errors": evidence_errors,

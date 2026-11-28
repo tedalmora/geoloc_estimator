@@ -453,6 +453,9 @@ def test_visit_cli_overrides_collection_and_location(tmp_path, monkeypatch):
     prepare.run_prepare(_prepare_args(), idle=Mock())
     run = Mock()
     monkeypatch.setattr(visit, "run_visit", run)
+    assert visit._main(["--campaign", "preliminar-interna", "--point", "P01", "--session", "S3"]) == 0
+    assert run.call_args.args[0].session == "S3"
+    run.reset_mock()
     assert visit._main([
         "--campaign", "preliminar-interna", "--point", "P01", "--session", "S2",
         "--db", "outro.db", "--results", "outros", "--canonical", "ref.csv",
@@ -739,7 +742,7 @@ def _write_canonical(path, points):
             writer.writerow({"point": point, "lat": -26.9 + index * 0.001, "lon": -49.07, "uncertainty_m": 0.5})
 
 
-def _acquired_collection(tmp_path, monkeypatch, points=FOUR_POINTS):
+def _acquired_collection(tmp_path, monkeypatch, points=FOUR_POINTS, sessions=("S1", "S2")):
     _prepare_env(tmp_path, monkeypatch)
     paths = prepare.collection_paths(tmp_path / "data", "coleta")
     results = paths["results"]
@@ -756,7 +759,7 @@ def _acquired_collection(tmp_path, monkeypatch, points=FOUR_POINTS):
     conn = db.connect(str(paths["db"]))
     for index, point in enumerate(points):
         point_id = db.add_reference_point(conn, point, -26.9 + index * 0.001, -49.07, coord_source="gnss_media_s1")
-        for session in ("S1", "S2"):
+        for session in sessions:
             session_id = db.create_session(
                 conn, mode="continuous", scenario="estatico", environment="indoor", modem_id="fn990",
                 metadata={}, reference_point_id=point_id, campaign_plmn="72406",
@@ -795,6 +798,22 @@ def test_check_complete_collection_is_ok(tmp_path, monkeypatch, capsys, points):
     assert f"Medições esperadas: {measurements}\nMedições encontradas: {measurements}" in out
     assert f"Complete: {measurements}\nPartial: 0\nInvalid: 0" in out
     assert "Banco: íntegro" in out and out.rstrip().endswith("Resultado: OK")
+
+
+def test_check_optional_s3_counts_when_every_point_has_it(tmp_path, monkeypatch, capsys):
+    _acquired_collection(tmp_path, monkeypatch, sessions=("S1", "S2", "S3"))
+    code, out = _run_check(capsys)
+    assert code == check.EXIT_OK
+    assert "Sessões esperadas: 12\nSessões encontradas: 12" in out and "Medições esperadas: 36" in out
+
+
+def test_check_s3_missing_in_some_point_is_error(tmp_path, monkeypatch, capsys):
+    _, db_path = _acquired_collection(tmp_path, monkeypatch, sessions=("S1", "S2", "S3"))
+    _session_sql(db_path, "DELETE FROM measurements WHERE session_id = (SELECT session_id FROM sessions WHERE "
+                          "notes = 'campaign_tools:raspberrypi_os:P03:S3'); "
+                          "DELETE FROM sessions WHERE notes = 'campaign_tools:raspberrypi_os:P03:S3'")
+    code, out = _run_check(capsys)
+    assert code == check.EXIT_ERROR and "P03/S3: sessao ausente" in out
 
 
 def test_check_is_read_only_and_creates_no_files(tmp_path, monkeypatch, capsys):
@@ -1191,8 +1210,8 @@ def test_wknn_train_calls_training_and_evaluation_in_order(tmp_path, monkeypatch
     train_argv = calls[0][1]
     assert train_argv[train_argv.index("--db") + 1] == str(db_path)
     assert train_argv[train_argv.index("--campaign-plmn") + 1] == "72406"
-    assert train_argv[train_argv.index("--k") + 1] == "2" and train_argv[train_argv.index("--metrics") + 1] == "L1"
     assert train_argv[train_argv.index("--report") + 1] == str(results / "modelos" / "treino_lte_spatial.json")
+    assert "--k" not in train_argv
     evaluate_argv = calls[1][1]
     assert evaluate_argv[evaluate_argv.index("--json-out") + 1] == str(results / "avaliacoes" / "spatial" / "avaliacao.json")
 

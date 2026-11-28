@@ -33,8 +33,6 @@ from . import check, config, prepare
 MODEL_PROTOCOLS = (PROTOCOL_SPATIAL, PROTOCOL_TEMPORAL, PROTOCOL_COMPLETE)
 DEPLOY_DIR = "deployed"
 DEBUG_DEFAULTS = {"TCC_DEBUG": "0", "TCC_METRICS": "", "TCC_SNAPSHOTS_DIR": "", "TCC_RUN_MANIFEST": ""}
-# Equipamento em ponto ja cadastrado: k pequeno e L1 padronizado deram o menor erro (S1>S2, S2>S1 e leituras reais).
-FIXED_HYPERPARAMETERS = ["--k", "2", "--metrics", "L1", "--scaling", "standardized", "--missing", "sentinel:-140"]
 
 
 def load_context(campaign, config_path):
@@ -163,7 +161,7 @@ def run_train(args):
     for protocol in MODEL_PROTOCOLS:
         paths = artifact_paths(results, technology, protocol)
         cli = ["--db", db_path, "--technology", technology, "--protocol", protocol,
-               "--out", str(paths["model"]), "--report", str(paths["report"])] + FIXED_HYPERPARAMETERS
+               "--out", str(paths["model"]), "--report", str(paths["report"])]
         if plmn:
             cli += ["--campaign-plmn", plmn]
         _run_cli(f"treino {technology} {protocol}", train.main, cli)
